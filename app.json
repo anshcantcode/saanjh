@@ -1,0 +1,65 @@
+{
+  "expo": {
+    "name": "Saanjh",
+    "slug": "saanjh",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/botanical-emblem.png",
+    "scheme": "saanjh",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Saanjh records only when you choose to create a voice sample or speak during a session.",
+        "NSPhotoLibraryUsageDescription": "Saanjh lets you choose a companion image from your library.",
+        "NSLocalNetworkUsageDescription": "Saanjh can connect to your development backend on a trusted local network.",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/botanical-emblem.png",
+        "backgroundColor": "#F3EEE5"
+      }
+    },
+    "web": {
+      "bundler": "metro",
+      "favicon": "./assets/botanical-emblem.png"
+    },
+    "plugins": [
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "Allow Saanjh to record only when you choose to speak or create a voice sample.",
+          "enableBackgroundRecording": false,
+          "enableBackgroundPlayback": false
+        }
+      ],
+      "expo-document-picker",
+      "expo-image-picker",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/welcome-forest.png",
+          "imageWidth": 440,
+          "resizeMode": "cover",
+          "backgroundColor": "#0C2927",
+          "dark": {
+            "backgroundColor": "#0C2927"
+          }
+        }
+      ],
+      "expo-asset"
+    ]
+  }
+}
