@@ -1,0 +1,15 @@
+{
+  "name": "saanjh-cinematic-showcase",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A cinematic scroll presentation for Saanjh.",
+  "type": "module",
+  "scripts": {
+    "dev": "node server.mjs",
+    "build": "node build.mjs",
+    "preview": "node server.mjs dist 4173"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
