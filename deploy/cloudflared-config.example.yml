@@ -1,0 +1,10 @@
+# Copy this outside the repository (normally to %USERPROFILE%/.cloudflared/config.yml)
+# and replace every angle-bracket placeholder. Never commit the credentials JSON.
+tunnel: <TUNNEL-UUID>
+credentials-file: C:/Users/<WINDOWS-USER>/.cloudflared/<TUNNEL-UUID>.json
+
+ingress:
+  - hostname: api.<YOUR-DOMAIN>
+    # Only FastAPI is reachable. Voicebox port 17493 has no ingress rule.
+    service: http://127.0.0.1:8000
+  - service: http_status:404

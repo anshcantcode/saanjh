@@ -1,8 +1,12 @@
 {
   "name": "saanjh-web",
   "version": "1.0.0",
+  "description": "Responsive web prototype for the Saanjh AI voice companion.",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p tsconfig.node.json && vite build",
@@ -11,8 +15,7 @@
   },
   "dependencies": {
     "react": "19.2.7",
-    "react-dom": "19.2.7",
-    "saanjh-expo": "file:.."
+    "react-dom": "19.2.7"
   },
   "devDependencies": {
     "@types/react": "19.2.17",

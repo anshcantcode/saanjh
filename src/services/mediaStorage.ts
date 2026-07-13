@@ -73,3 +73,36 @@ export function deletePersistedMedia(uri?: string): void {
   const file = new File(uri);
   if (file.exists) file.delete();
 }
+
+export function clearGeneratedAudioCache(): void {
+  if (Platform.OS === 'web') return;
+  const directory = new Directory(Paths.cache, 'saanjh-audio-cache');
+  if (directory.exists) directory.delete();
+}
+
+export function clearAllPersistedMedia(): void {
+  if (Platform.OS === 'web') return;
+  const mediaDirectory = new Directory(Paths.document, 'saanjh-media');
+  const audioCache = new Directory(Paths.cache, 'saanjh-audio-cache');
+  if (mediaDirectory.exists) mediaDirectory.delete();
+  if (audioCache.exists) audioCache.delete();
+}
+
+export async function persistGeneratedAudio(
+  bytes: Uint8Array,
+  generationId: string,
+  persistent: boolean,
+): Promise<string> {
+  if (Platform.OS === 'web') {
+    return URL.createObjectURL(new Blob([bytes as BlobPart], { type: 'audio/wav' }));
+  }
+  const base = persistent ? Paths.document : Paths.cache;
+  const directory = new Directory(base, persistent ? 'saanjh-media' : 'saanjh-audio-cache');
+  await directory.create({ idempotent: true, intermediates: true });
+  const safeId = safeName(generationId);
+  const destination = new File(directory, `${safeId}.wav`);
+  if (destination.exists) destination.delete();
+  destination.create();
+  destination.write(bytes);
+  return destination.uri;
+}

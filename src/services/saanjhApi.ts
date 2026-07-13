@@ -1,11 +1,15 @@
 /**
  * Typed client for the Saanjh FastAPI gateway.
  *
- * EXPO_PUBLIC_API_URL is a public build-time value, not a secret. Point it at
- * the HTTPS origin of the deployed gateway (for example,
- * https://api.example.com). Groq and Voicebox credentials remain on that
- * server and must never be placed in an EXPO_PUBLIC_* variable.
+ * The app prefers EXPO_PUBLIC_API_URL but also falls back to Expo's runtime
+ * config extra.apiUrl so Android builds keep working even when that env var is
+ * absent. Groq and Voicebox credentials remain server-side and must never be
+ * placed in an EXPO_PUBLIC_* variable.
  */
+
+import Constants from 'expo-constants';
+import { File as ExpoFile, UploadType } from 'expo-file-system';
+import { Platform } from 'react-native';
 
 declare const process: {
   env: {
@@ -191,6 +195,32 @@ export interface ChatTurn {
   model: string;
 }
 
+export interface LocalCompanionContext {
+  name: string;
+  relationship: Relationship;
+  custom_relationship?: string | null;
+  voice_status: VoiceStatus;
+  consent_acknowledged: true;
+  ai_disclosure_acknowledged: true;
+  traits?: string[];
+  memories?: string[];
+  address_as?: string | null;
+  helpful_when?: string | null;
+  avoid?: string | null;
+}
+
+export interface LocalChatRequest {
+  companion: LocalCompanionContext;
+  history?: Array<{ role: MessageRole; content: string }>;
+  message: string;
+}
+
+export interface LocalChatResponse {
+  reply: string;
+  model: string;
+  disclosure_text: typeof AI_DISCLOSURE;
+}
+
 export interface VoiceboxProfileCreate {
   name: string;
   description?: string | null;
@@ -254,9 +284,29 @@ export interface ApiRequestOptions {
   timeoutMs?: number;
 }
 
+export interface FileUploadProgress {
+  bytesSent: number;
+  totalBytes: number;
+  /** A real byte ratio when the native uploader knows the total, otherwise null. */
+  ratio: number | null;
+  stage: 'reading' | 'uploading' | 'registering';
+}
+
+export interface FileUploadOptions extends ApiRequestOptions {
+  onUploadProgress?: (progress: FileUploadProgress) => void;
+}
+
 export interface WaitForGenerationOptions extends ApiRequestOptions {
   pollIntervalMs?: number;
   maxWaitMs?: number;
+  onProgress?: (progress: VoiceGenerationProgress) => void;
+}
+
+export interface VoiceGenerationProgress {
+  generation: NormalizedVoiceboxGeneration;
+  status: string;
+  elapsedMs: number;
+  pollCount: number;
 }
 
 export interface FastApiValidationIssue {
@@ -332,21 +382,41 @@ function nonEmptyString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
+const fallbackApiUrl = ((): string => {
+  const fromEnv = process.env.EXPO_PUBLIC_API_URL?.trim();
+  if (fromEnv) return fromEnv;
+
+  const runtimeExtra = (
+    (Constants.expoConfig?.extra as { apiUrl?: string } | undefined)
+    ?? (Constants.manifest2?.extra as { apiUrl?: string } | undefined)
+    ?? (Constants.manifest?.extra as { apiUrl?: string } | undefined)
+  );
+  const fromExpoConfig = runtimeExtra?.apiUrl?.trim();
+  if (fromExpoConfig) return fromExpoConfig;
+
+  return '';
+})();
+
 export function normalizeApiBaseUrl(value: string | undefined): string {
   const normalized = value?.trim().replace(/\/+$/, '') ?? '';
   if (!normalized) return '';
   if (!/^https?:\/\//i.test(normalized)) {
-    throw new SaanjhApiError('EXPO_PUBLIC_API_URL must begin with http:// or https://.', {
+    throw new SaanjhApiError('The Saanjh backend URL must begin with http:// or https://.', {
       code: 'invalid-api-url',
     });
   }
   return normalized;
 }
 
-export const SAANJH_API_BASE_URL = normalizeApiBaseUrl(process.env.EXPO_PUBLIC_API_URL);
+export const SAANJH_API_BASE_URL = normalizeApiBaseUrl(fallbackApiUrl);
 
 function joinUrl(baseUrl: string, path: string): string {
   return `${baseUrl}${path.startsWith('/') ? path : `/${path}`}`;
+}
+
+function appendQueryParam(url: string, key: string, value: string): string {
+  const separator = url.includes('?') ? '&' : '?';
+  return `${url}${separator}${encodeURIComponent(key)}=${encodeURIComponent(value)}`;
 }
 
 export function mediaUrl(path: string | null | undefined, baseUrl = SAANJH_API_BASE_URL): string | undefined {
@@ -394,6 +464,16 @@ function describeError(payload: unknown, status: number): ErrorDescription {
     const body = payload.error as BackendErrorBody;
     const message = nonEmptyString(body.message);
     if (message) {
+      if (status === 401 || nonEmptyString(body.code) === 'authentication_required') {
+        return {
+          message: 'Authentication failed. Verify the backend connection and try again.',
+          code: 'authentication_required',
+          service: nonEmptyString(body.service),
+          upstreamStatus: typeof body.upstream_status === 'number' || body.upstream_status === null
+            ? body.upstream_status
+            : undefined,
+        };
+      }
       return {
         message,
         code: nonEmptyString(body.code),
@@ -433,21 +513,9 @@ function parsePayload(text: string): unknown {
   }
 }
 
-function appendFile(form: FormData, file: ReactNativeFile): void {
-  if (!file.uri.trim()) {
-    throw new SaanjhApiError('The selected audio file has no URI.', { code: 'invalid-file' });
-  }
-  if (!file.name.trim()) {
-    throw new SaanjhApiError('The selected audio file has no name.', { code: 'invalid-file' });
-  }
-  if (!file.type.trim()) {
-    throw new SaanjhApiError('The selected audio file has no MIME type.', { code: 'invalid-file' });
-  }
-  form.append('file', {
-    uri: file.uri,
-    name: file.name,
-    type: file.type,
-  } as unknown as Blob);
+function uploadRatio(bytesSent: number, totalBytes: number): number | null {
+  if (!Number.isFinite(totalBytes) || totalBytes <= 0) return null;
+  return Math.max(0, Math.min(1, bytesSent / totalBytes));
 }
 
 function unwrapObject(value: unknown, keys: string[]): Record<string, unknown> | undefined {
@@ -459,7 +527,16 @@ function unwrapObject(value: unknown, keys: string[]): Record<string, unknown> |
 }
 
 function generationId(value: Record<string, unknown>): string | undefined {
-  for (const key of ['id', 'generation_id', 'job_id']) {
+  for (const key of ['id', 'generation_id', 'job_id', 'task_id']) {
+    const id = nonEmptyString(value[key]);
+    if (id) return id;
+    if (typeof value[key] === 'number' && Number.isFinite(value[key])) return String(value[key]);
+  }
+  return undefined;
+}
+
+function voiceboxProfileId(value: Record<string, unknown>): string | undefined {
+  for (const key of ['id', 'profile_id', 'voice_id']) {
     const id = nonEmptyString(value[key]);
     if (id) return id;
     if (typeof value[key] === 'number' && Number.isFinite(value[key])) return String(value[key]);
@@ -478,16 +555,26 @@ function normalizeGeneration(value: unknown, baseUrl: string): NormalizedVoicebo
       details: value,
     });
   }
-  const rawAudioUrl = nonEmptyString(generation.audio_url);
-  const status = nonEmptyString(generation.status)?.toLowerCase();
+  const rawAudioUrl = nonEmptyString(generation.audio_url) ?? nonEmptyString(generation.audio_uri);
+  const hasAudioPath = Boolean(
+    nonEmptyString(generation.audio_path)
+    ?? nonEmptyString(generation.output_path)
+    ?? nonEmptyString(generation.file_path)
+    ?? nonEmptyString(generation.path),
+  );
+  const status = (nonEmptyString(generation.status) ?? nonEmptyString(generation.state))?.toLowerCase();
+  const completed = status
+    ? ['completed', 'complete', 'done', 'success', 'succeeded'].includes(status)
+    : false;
   const resolvedAudioUrl = rawAudioUrl
     ? mediaUrl(rawAudioUrl, baseUrl)
-    : status === 'completed' || nonEmptyString(generation.audio_path)
+    : completed || hasAudioPath
       ? mediaUrl(`/api/voicebox/audio/${encodeURIComponent(id)}`, baseUrl)
       : undefined;
   return {
     ...generation,
     generation_id: id,
+    status: status ?? generation.status,
     audio_url: resolvedAudioUrl,
   } as NormalizedVoiceboxGeneration;
 }
@@ -517,24 +604,36 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 export class SaanjhApiClient {
-  readonly baseUrl: string;
+  private currentBaseUrl: string;
+  private accessToken: string;
   private readonly fetchImpl: typeof fetch;
   private readonly defaultTimeoutMs: number;
 
   constructor(options: {
     baseUrl?: string;
+    accessToken?: string;
     fetchImpl?: typeof fetch;
     defaultTimeoutMs?: number;
   } = {}) {
-    this.baseUrl = normalizeApiBaseUrl(options.baseUrl ?? SAANJH_API_BASE_URL);
+    this.currentBaseUrl = normalizeApiBaseUrl(options.baseUrl ?? SAANJH_API_BASE_URL);
+    this.accessToken = options.accessToken?.trim() ?? '';
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.defaultTimeoutMs = options.defaultTimeoutMs ?? DEFAULT_API_TIMEOUT_MS;
+  }
+
+  get baseUrl(): string {
+    return this.currentBaseUrl;
+  }
+
+  configure(options: { baseUrl?: string; accessToken?: string }): void {
+    if (options.baseUrl !== undefined) this.currentBaseUrl = normalizeApiBaseUrl(options.baseUrl);
+    if (options.accessToken !== undefined) this.accessToken = options.accessToken.trim();
   }
 
   private async request<T>(path: string, options: InternalRequestOptions = {}): Promise<T> {
     if (!this.baseUrl) {
       throw new SaanjhApiError(
-        'The Saanjh backend is not configured. Set EXPO_PUBLIC_API_URL to its public HTTPS address and rebuild the app.',
+        'The Saanjh backend is not configured. Add and test its public HTTPS address in the app connection settings.',
         { code: 'api-not-configured' },
       );
     }
@@ -566,6 +665,7 @@ export class SaanjhApiClient {
         signal: controller.signal,
         headers: {
           Accept: 'application/json',
+          ...(this.accessToken ? { Authorization: `Bearer ${this.accessToken}` } : {}),
           ...(!isForm && options.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
           ...options.headers,
         },
@@ -613,6 +713,211 @@ export class SaanjhApiClient {
     } finally {
       clearTimeout(timer);
       externalSignal?.removeEventListener('abort', relayAbort);
+    }
+  }
+
+  private async requestBytes(path: string, options: ApiRequestOptions = {}): Promise<Uint8Array> {
+    if (!this.baseUrl) throw new SaanjhApiError('The Saanjh backend is not configured.', { code: 'api-not-configured' });
+    const baseUploadUrl = joinUrl(this.baseUrl, path);
+    const url = this.accessToken ? appendQueryParam(baseUploadUrl, 'access_token', this.accessToken) : baseUploadUrl;
+    const controller = new AbortController();
+    const relayAbort = () => controller.abort();
+    if (options.signal?.aborted) controller.abort();
+    else options.signal?.addEventListener('abort', relayAbort, { once: true });
+    const timeoutMs = options.timeoutMs ?? DEFAULT_VOICE_TIMEOUT_MS;
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+    try {
+      const response = await this.fetchImpl(url, {
+        method: 'GET',
+        signal: controller.signal,
+        headers: {
+          Accept: 'audio/wav,audio/*;q=0.9,*/*;q=0.1',
+          ...(this.accessToken ? { Authorization: `Bearer ${this.accessToken}` } : {}),
+        },
+      });
+      if (!response.ok) {
+        const payload = parsePayload(await response.text());
+        const description = describeError(payload, response.status);
+        throw new SaanjhApiError(description.message, {
+          status: response.status,
+          code: description.code,
+          service: description.service,
+          details: payload,
+          method: 'GET',
+          url,
+        });
+      }
+      return new Uint8Array(await response.arrayBuffer());
+    } catch (error) {
+      if (error instanceof SaanjhApiError) throw error;
+      if (timedOut) throw new SaanjhApiError('Generated audio took too long to download.', { code: 'timeout', cause: error });
+      if (options.signal?.aborted) throw new SaanjhApiError('The request was cancelled.', { code: 'aborted', cause: error });
+      throw new SaanjhApiError('Could not download the generated audio from Saanjh.', { code: 'network-error', cause: error });
+    } finally {
+      clearTimeout(timer);
+      options.signal?.removeEventListener('abort', relayAbort);
+    }
+  }
+
+  /**
+   * Upload a local file using Expo's native transfer implementation on Android/iOS.
+   *
+   * React Native's fetch/FormData bridge can reject a perfectly valid file:// URI
+   * before any request reaches FastAPI. ExpoFile.upload reads the URI natively and
+   * also exposes real byte progress. The web branch still uses standards-based
+   * FormData after resolving the local blob.
+   */
+  private async uploadMultipart<T>(
+    path: string,
+    file: ReactNativeFile,
+    fields: Record<string, string>,
+    options: FileUploadOptions = {},
+  ): Promise<T> {
+    if (!this.baseUrl) {
+      throw new SaanjhApiError('The Saanjh backend is not configured.', { code: 'api-not-configured' });
+    }
+    if (!file.uri.trim()) throw new SaanjhApiError('The selected audio file has no URI.', { code: 'invalid-file' });
+    if (!file.name.trim()) throw new SaanjhApiError('The selected audio file has no name.', { code: 'invalid-file' });
+    if (!file.type.trim()) throw new SaanjhApiError('The selected audio file has no MIME type.', { code: 'invalid-file' });
+
+    if (Platform.OS === 'web') {
+      options.onUploadProgress?.({ bytesSent: 0, totalBytes: 0, ratio: null, stage: 'reading' });
+      let blob: Blob;
+      try {
+        const localResponse = await this.fetchImpl(file.uri);
+        if (!localResponse.ok) throw new Error(`Local file read returned ${localResponse.status}`);
+        blob = await localResponse.blob();
+      } catch (error) {
+        throw new SaanjhApiError('Saanjh could not read the selected sample in this browser. Choose the audio file again.', {
+          code: 'local-file-unreadable',
+          cause: error,
+        });
+      }
+      if (!blob.size) {
+        throw new SaanjhApiError('The selected audio sample is empty. Record or import it again.', { code: 'empty-file' });
+      }
+      const form = new FormData();
+      form.append('file', blob.type ? blob : new Blob([blob], { type: file.type }), file.name);
+      Object.entries(fields).forEach(([name, value]) => form.append(name, value));
+      options.onUploadProgress?.({ bytesSent: 0, totalBytes: blob.size, ratio: 0, stage: 'uploading' });
+      const payload = await this.request<T>(path, {
+        ...options,
+        method: 'POST',
+        body: form,
+      });
+      options.onUploadProgress?.({ bytesSent: blob.size, totalBytes: blob.size, ratio: 1, stage: 'registering' });
+      return payload;
+    }
+
+    let source: ExpoFile;
+    try {
+      source = new ExpoFile(file.uri);
+      if (!source.exists) {
+        throw new Error('The local file no longer exists.');
+      }
+      if ((source.size ?? 0) <= 0) {
+        throw new SaanjhApiError('The saved audio sample is empty. Record or import it again.', { code: 'empty-file' });
+      }
+    } catch (error) {
+      if (error instanceof SaanjhApiError) throw error;
+      throw new SaanjhApiError('Saanjh could not read the saved sample on this phone. Record or import it again.', {
+        code: 'local-file-unreadable',
+        details: { uriScheme: file.uri.split(':', 1)[0] || 'unknown' },
+        cause: error,
+      });
+    }
+
+    const url = joinUrl(this.baseUrl, path);
+    const method = 'POST';
+    const controller = new AbortController();
+    const relayAbort = () => controller.abort();
+    if (options.signal?.aborted) controller.abort();
+    else options.signal?.addEventListener('abort', relayAbort, { once: true });
+    const timeoutMs = options.timeoutMs ?? DEFAULT_VOICE_TIMEOUT_MS;
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+    const knownSize = source.size ?? 0;
+    options.onUploadProgress?.({ bytesSent: 0, totalBytes: knownSize, ratio: knownSize ? 0 : null, stage: 'reading' });
+
+    try {
+      const result = await source.upload(url, {
+        httpMethod: method,
+        uploadType: UploadType.MULTIPART,
+        fieldName: 'file',
+        mimeType: file.type,
+        parameters: fields,
+        sessionType: 'foreground',
+        signal: controller.signal,
+        headers: {
+          Accept: 'application/json',
+          ...(this.accessToken ? { Authorization: `Bearer ${this.accessToken}` } : {}),
+        },
+        onProgress: ({ bytesSent, totalBytes }) => {
+          const ratio = uploadRatio(bytesSent, totalBytes);
+          options.onUploadProgress?.({
+            bytesSent,
+            totalBytes,
+            ratio,
+            stage: ratio !== null && ratio >= 1 ? 'registering' : 'uploading',
+          });
+        },
+      });
+      const payload = parsePayload(result.body);
+      if (result.status < 200 || result.status >= 300) {
+        const description = describeError(payload, result.status);
+        throw new SaanjhApiError(description.message, {
+          status: result.status,
+          code: description.code,
+          service: description.service,
+          upstreamStatus: description.upstreamStatus,
+          validationIssues: description.validationIssues,
+          details: payload,
+          method,
+          url,
+        });
+      }
+      options.onUploadProgress?.({
+        bytesSent: knownSize,
+        totalBytes: knownSize,
+        ratio: knownSize ? 1 : null,
+        stage: 'registering',
+      });
+      return payload as T;
+    } catch (error) {
+      if (error instanceof SaanjhApiError) throw error;
+      if (timedOut) {
+        throw new SaanjhApiError(`The sample upload or Voicebox registration did not finish within ${Math.round(timeoutMs / 1000)} seconds.`, {
+          code: 'upload-timeout',
+          method,
+          url,
+          cause: error,
+        });
+      }
+      if (options.signal?.aborted || controller.signal.aborted) {
+        throw new SaanjhApiError('The sample upload was cancelled.', {
+          code: 'aborted',
+          method,
+          url,
+          cause: error,
+        });
+      }
+      throw new SaanjhApiError(
+        'This phone could not upload the sample to Saanjh. The service check can still appear online because it does not transfer a file. Check the public HTTPS server and try again.',
+        {
+          code: 'upload-network-error',
+          method,
+          url,
+          details: { uriScheme: file.uri.split(':', 1)[0] || 'unknown' },
+          cause: error,
+        },
+      );
+    } finally {
+      clearTimeout(timer);
+      options.signal?.removeEventListener('abort', relayAbort);
     }
   }
 
@@ -735,6 +1040,15 @@ export class SaanjhApiClient {
     });
   }
 
+  localChat(input: LocalChatRequest, options?: ApiRequestOptions): Promise<LocalChatResponse> {
+    return this.request('/api/v1/local/chat', {
+      ...options,
+      timeoutMs: options?.timeoutMs ?? 60_000,
+      method: 'POST',
+      body: input as unknown as Record<string, unknown>,
+    });
+  }
+
   voiceboxHealth(options?: ApiRequestOptions): Promise<unknown> {
     return this.request('/api/voicebox/health', options);
   }
@@ -787,34 +1101,62 @@ export class SaanjhApiClient {
     profileId: string,
     file: ReactNativeFile,
     referenceText: string,
-    options?: ApiRequestOptions,
+    options?: FileUploadOptions,
   ): Promise<unknown> {
-    const form = new FormData();
-    appendFile(form, file);
-    form.append('reference_text', referenceText);
-    return this.request(`/api/voicebox/profiles/${encodeURIComponent(profileId)}/samples`, {
-      ...options,
-      timeoutMs: options?.timeoutMs ?? DEFAULT_VOICE_TIMEOUT_MS,
-      method: 'POST',
-      body: form,
-    });
+    return this.uploadMultipart(
+      `/api/voicebox/profiles/${encodeURIComponent(profileId)}/samples`,
+      file,
+      { reference_text: referenceText },
+      { ...options, timeoutMs: options?.timeoutMs ?? DEFAULT_VOICE_TIMEOUT_MS },
+    );
+  }
+
+  async createVoiceboxProfileWithSample(
+    input: VoiceboxProfileCreate,
+    file: ReactNativeFile,
+    referenceText: string,
+    options?: FileUploadOptions,
+  ): Promise<VoiceboxProfile> {
+    const fields: Record<string, string> = {
+      name: input.name,
+      language: input.language ?? 'en',
+      voice_type: input.voice_type ?? 'cloned',
+      reference_text: referenceText,
+    };
+    if (input.description?.trim()) fields.description = input.description.trim();
+    if (input.default_engine?.trim()) fields.default_engine = input.default_engine.trim();
+    const payload = await this.uploadMultipart<unknown>(
+      '/api/voicebox/profiles/with-sample',
+      file,
+      fields,
+      { ...options, timeoutMs: options?.timeoutMs ?? DEFAULT_VOICE_TIMEOUT_MS },
+    );
+    const profile = unwrapObject(payload, ['profile', 'data']);
+    if (!profile || !voiceboxProfileId(profile)) {
+      throw new SaanjhApiError('Voicebox registered the sample but returned an invalid profile.', {
+        status: 502,
+        code: 'invalid-voicebox-response',
+        service: 'Voicebox',
+        details: payload,
+      });
+    }
+    return profile as VoiceboxProfile;
   }
 
   async transcribe(
     file: ReactNativeFile,
     input: TranscriptionOptions = {},
-    options?: ApiRequestOptions,
+    options?: FileUploadOptions,
   ): Promise<string> {
-    const form = new FormData();
-    appendFile(form, file);
-    if (input.language?.trim()) form.append('language', input.language.trim());
-    if (input.model?.trim()) form.append('model', input.model.trim());
-    const payload = await this.request<unknown>('/api/voicebox/transcribe', {
-      ...options,
-      timeoutMs: options?.timeoutMs ?? DEFAULT_VOICE_TIMEOUT_MS,
-      method: 'POST',
-      body: form,
-    });
+    const fields: Record<string, string> = {};
+    if (input.language?.trim()) fields.language = input.language.trim();
+    if (input.model?.trim()) fields.model = input.model.trim();
+    const payload = await this.uploadMultipart<unknown>(
+      '/api/voicebox/transcribe',
+      file,
+      fields,
+      { ...options, timeoutMs: options?.timeoutMs ?? DEFAULT_VOICE_TIMEOUT_MS },
+    );
     const transcript = transcriptionText(payload);
     if (!transcript) {
       throw new SaanjhApiError('Voicebox returned no transcription text.', {
@@ -853,11 +1195,13 @@ export class SaanjhApiClient {
     options: WaitForGenerationOptions = {},
   ): Promise<NormalizedVoiceboxGeneration> {
     const startedAt = Date.now();
-    const maxWaitMs = options.maxWaitMs ?? DEFAULT_VOICE_TIMEOUT_MS;
-    const pollIntervalMs = options.pollIntervalMs ?? 1_000;
+    const { maxWaitMs = DEFAULT_VOICE_TIMEOUT_MS, pollIntervalMs = 1_000, onProgress, ...requestOptions } = options;
+    let pollCount = 0;
     while (Date.now() - startedAt < maxWaitMs) {
-      const generation = await this.getVoiceGeneration(id, options);
+      const generation = await this.getVoiceGeneration(id, requestOptions);
       const status = generation.status?.toLowerCase();
+      pollCount += 1;
+      onProgress?.({ generation, status: status || 'processing', elapsedMs: Date.now() - startedAt, pollCount });
       if (status === 'completed' || generation.audio_url) return generation;
       if (status === 'failed' || status === 'error' || status === 'cancelled') {
         throw new SaanjhApiError(generation.error ?? generation.detail ?? 'Voicebox could not generate this audio.', {
@@ -867,7 +1211,7 @@ export class SaanjhApiClient {
           details: generation,
         });
       }
-      await delay(pollIntervalMs, options.signal);
+      await delay(pollIntervalMs, requestOptions.signal);
     }
     throw new SaanjhApiError('Voicebox did not finish generating audio in time.', {
       code: 'generation-timeout',
@@ -876,16 +1220,55 @@ export class SaanjhApiClient {
     });
   }
 
+  cancelVoiceGeneration(generationId: string, options?: ApiRequestOptions): Promise<unknown> {
+    return this.request(`/api/voicebox/generate/${encodeURIComponent(generationId)}/cancel`, {
+      ...options,
+      method: 'POST',
+    });
+  }
+
   voiceAudioUrl(generationId: string): string {
     return mediaUrl(`/api/voicebox/audio/${encodeURIComponent(generationId)}`, this.baseUrl) as string;
+  }
+
+
+  voiceAudioBytes(generationId: string, options?: ApiRequestOptions): Promise<Uint8Array> {
+    return this.requestBytes(`/api/voicebox/audio/${encodeURIComponent(generationId)}`, options);
   }
 }
 
 export const saanjhApi = new SaanjhApiClient();
 export const api = saanjhApi;
 
+export function configureSaanjhApi(options: { baseUrl?: string; accessToken?: string }): void {
+  saanjhApi.configure(options);
+}
+
 export function displaySaanjhError(error: unknown): string {
-  if (error instanceof SaanjhApiError) return error.message;
+  if (error instanceof SaanjhApiError) {
+    if (error.code === 'sample_too_short' || /longer than\s*5\s*seconds|sample is too short|at least 6 seconds/i.test(error.message)) {
+      return 'Record or import at least 6 seconds of clear speech, then clone again.';
+    }
+    if (error.code === 'authentication_required' || error.status === 401) {
+      return 'Saanjh could not connect securely. Please update the app and try again.';
+    }
+    if (error.code === 'network-error' || error.code === 'upload-network-error' || error.code === 'unreachable') {
+      return 'Saanjh could not connect. Check your internet connection and try again.';
+    }
+    if (error.code === 'timeout' || error.code === 'upload-timeout' || error.code === 'generation-timeout') {
+      return 'This is taking longer than expected. Please try once more.';
+    }
+    if (error.service?.toLowerCase() === 'voicebox' || /voicebox/i.test(error.message)) {
+      return 'The AI voice is temporarily unavailable. Your written reply and local data are safe.';
+    }
+    if (error.service?.toLowerCase() === 'groq' || /groq/i.test(error.message)) {
+      return 'Saanjh could not prepare a reply just now. Please try again shortly.';
+    }
+    return error.message
+      .replace(/the Saanjh backend/gi, 'Saanjh')
+      .replace(/backend/gi, 'service')
+      .replace(/public API address/gi, 'connection');
+  }
   if (error instanceof Error && error.message) return error.message;
   return 'The request could not be completed.';
 }

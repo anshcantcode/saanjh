@@ -16,8 +16,10 @@ Copy-Item .env.example .env
 Set `GROQ_API_KEY` in `.env`. Keep `VOICEBOX_URL=http://127.0.0.1:17493` when FastAPI and Voicebox run on this computer. Then start the API:
 
 ```powershell
-python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
+
+Loopback is the default because Cloudflare Tunnel can reach it without exposing the API directly to the LAN. From the repository root, `npm run api` uses this mode. Use `npm run api:lan` only for development on a trusted private network; it binds `0.0.0.0`, so restrict any Windows Firewall exception to the Private profile.
 
 - OpenAPI UI: `http://127.0.0.1:8000/docs`
 - OpenAPI JSON: `http://127.0.0.1:8000/openapi.json`
@@ -31,6 +33,7 @@ python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 | --- | --- |
 | `DATABASE_PATH` | SQLite path. Relative paths resolve under `backend`. |
 | `CORS_ORIGINS` | Comma-separated browser origins or `*` for local development. |
+| `SAANJH_API_TOKEN` | Optional 32+ character bearer token protecting every `/api/*` route. Empty preserves local development behavior. |
 | `GROQ_API_KEY` | Required server secret for chat and Groq health. Never send this from Expo. |
 | `GROQ_MODEL` | Server-selected Groq model. Defaults to `llama-3.1-8b-instant`. |
 | `GROQ_BASE_URL` | Groq REST base. Defaults to the official OpenAI-compatible endpoint. |
@@ -133,6 +136,12 @@ If `session_id` is omitted, the API creates and returns a new active session. It
 
 If Groq fails, the real user message remains stored and no assistant message or fallback reply is fabricated. Fetch the session messages to retry or recover.
 
+### Phone-local-first Groq chat
+
+`POST /api/v1/local/chat` is the non-persisting Android contract. The request contains the minimum consented companion context, up to 100 locally stored `{role, content}` history items, and the current `message`. The server forwards at most `GROQ_HISTORY_LIMIT` recent history items to Groq and returns only `{reply, model, disclosure_text}`. It never reads or writes the Saanjh SQLite tables.
+
+Use this route when companion settings, messages, moods, and journals belong on the phone. Groq still processes the supplied turn, and Voicebox must remotely retain the cloned profile/sample required for synthesis. Full deployment and tunnel guidance is in `../deploy/ANYWHERE_NETWORK.md`.
+
 ### Voicebox proxy
 
 All Voicebox requests use the server-only `VOICEBOX_URL`:
@@ -142,11 +151,13 @@ All Voicebox requests use the server-only `VOICEBOX_URL`:
 | GET | `/api/voicebox/health` | `GET /health` |
 | GET | `/api/voicebox/profiles` | `GET /profiles` |
 | POST | `/api/voicebox/profiles` | `POST /profiles` with `{name, description?, language, voice_type, default_engine?}` |
+| POST | `/api/voicebox/profiles/with-sample` | Native-friendly multipart profile creation plus sample attachment. Rolls back the new profile if Voicebox rejects the sample. |
 | DELETE | `/api/voicebox/profiles/{id}` | `DELETE /profiles/{id}` for rollback and explicit cleanup. |
 | POST | `/api/voicebox/profiles/{id}/samples` | Multipart `file` plus required `reference_text`. |
 | POST | `/api/voicebox/transcribe` | Multipart `file`, optional `language` and `model`. |
 | POST | `/api/voicebox/generate` | `{profile_id, text, language, engine?}`; `personality` is forced off server-side so Voicebox cannot rewrite the safety-reviewed reply. |
 | GET | `/api/voicebox/history/{generation_id}` | Poll `GET /history/{generation_id}` and expose a backend audio URL when complete. |
+| POST | `/api/voicebox/generate/{generation_id}/cancel` | Cancel a queued or abandoned Voicebox generation when the phone stops waiting. |
 | GET | `/api/voicebox/audio/{generation_id}` | Streams `GET /audio/{generation_id}` without revealing the Voicebox URL. |
 
 Uploads are bounded, filenames are stripped of directory components, non-audio content types are rejected, redirects are not followed, upstream cookies/filenames are not forwarded, and audio responses use `Cache-Control: no-store` plus `X-Content-Type-Options: nosniff`.

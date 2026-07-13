@@ -284,6 +284,56 @@ class ChatTurnOut(APIModel):
     model: str
 
 
+class LocalCompanionContext(APIModel):
+    """The minimum companion context needed for a non-persisting chat turn.
+
+    The client deliberately keeps device-only paths, sample metadata, consent
+    notes, and Voicebox identifiers out of the language-model request.
+    """
+
+    name: str = Field(min_length=1, max_length=120)
+    relationship: Relationship
+    custom_relationship: str | None = Field(default=None, max_length=120)
+    voice_status: VoiceStatus
+    consent_acknowledged: Literal[True]
+    ai_disclosure_acknowledged: Literal[True]
+    traits: list[str] = Field(default_factory=list, max_length=30)
+    memories: list[str] = Field(default_factory=list, max_length=100)
+    address_as: str | None = Field(default=None, max_length=120)
+    helpful_when: str | None = Field(default=None, max_length=4000)
+    avoid: str | None = Field(default=None, max_length=4000)
+
+    @field_validator("traits", "memories")
+    @classmethod
+    def clean_lists(cls, value: list[str]) -> list[str]:
+        return _clean_text_list(value)
+
+    @model_validator(mode="after")
+    def validate_relationship(self) -> "LocalCompanionContext":
+        if self.relationship is Relationship.other and not self.custom_relationship:
+            raise ValueError("customRelationship is required when relationship is other.")
+        return self
+
+
+class LocalChatMessage(APIModel):
+    role: MessageRole
+    content: str = Field(min_length=1, max_length=50000)
+
+
+class LocalChatRequest(APIModel):
+    """A complete chat turn whose inputs are never written to SQLite."""
+
+    companion: LocalCompanionContext
+    history: list[LocalChatMessage] = Field(default_factory=list, max_length=100)
+    message: str = Field(min_length=1, max_length=50000)
+
+
+class LocalChatOut(APIModel):
+    reply: str
+    model: str
+    disclosure_text: Literal[AI_DISCLOSURE] = AI_DISCLOSURE
+
+
 class VoiceboxProfileCreate(APIModel):
     name: str = Field(min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=1000)

@@ -92,16 +92,20 @@ import {
   type SessionKind,
 } from './src/types';
 import { clearAppData, loadAppData, saveAppData } from './src/services/storage';
-import { deletePersistedMedia, persistMediaUri } from './src/services/mediaStorage';
+import { clearAllPersistedMedia, clearGeneratedAudioCache, deletePersistedMedia, persistGeneratedAudio, persistMediaUri } from './src/services/mediaStorage';
+import { clearApiAccessToken, loadApiAccessToken, saveApiAccessToken } from './src/services/secureSettings';
+import { BotanicalSampleActionCard, RitualsScreen, VoiceGenerationStatus, type VoiceGenerationStage } from './src/components';
+import { BotanicalActionCard } from './src/components/BotanicalActionCard';
 import {
-  AI_DISCLOSURE,
   SAANJH_API_BASE_URL,
   api,
+  configureSaanjhApi,
   displaySaanjhError,
-  type ChatMessage as ApiChatMessage,
-  type Companion as ApiCompanion,
+  type FileUploadProgress,
   type HealthResponse,
+  type LocalCompanionContext,
   type ReactNativeFile,
+  type VoiceGenerationProgress,
   type VoiceboxProfile,
 } from './src/services/saanjhApi';
 
@@ -120,6 +124,7 @@ type Route =
   | 'today'
   | 'companion'
   | 'journal'
+  | 'rituals'
   | 'settings'
   | 'mood'
   | 'precall'
@@ -127,12 +132,13 @@ type Route =
   | 'aftercare'
   | 'safety';
 
-type TabRoute = 'today' | 'companion' | 'journal' | 'settings';
+type TabRoute = 'today' | 'companion' | 'rituals' | 'journal' | 'settings';
 
 const uid = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
 const now = () => new Date().toISOString();
 const displayError = (error: unknown) => displaySaanjhError(error) || 'Something went quiet. Please try again.';
 const timeLabel = (seconds: number) => `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`;
+const isTemporaryBackendUrl = (value: string) => /(?:\.trycloudflare\.com|\.loca\.lt)(?:\/|$)/i.test(value.trim());
 
 const RELATIONSHIPS: Array<{ id: CompanionRelationship; label: string }> = [
   { id: 'friend', label: 'Friend' },
@@ -192,66 +198,91 @@ async function makeAudioFile(uri: string, name: string, mime?: string): Promise<
   return { uri, name, type: mime ?? guessMime(name) };
 }
 
+function fileTransferLabel(progress: FileUploadProgress, registeringLabel: string): string {
+  if (progress.stage === 'reading') return 'Reading the saved sample on this phone…';
+  if (progress.stage === 'registering') return registeringLabel;
+  if (progress.ratio !== null) return `Uploading the sample securely… ${Math.round(progress.ratio * 100)}%`;
+  return 'Uploading the sample securely…';
+}
+
 function sanitizedSettings(settings: AppSettings): AppSettings {
-  return { allowTranscripts: settings.allowTranscripts, reducedMotion: settings.reducedMotion };
+  return {
+    apiBaseUrl: settings.apiBaseUrl.trim(),
+    allowTranscripts: settings.allowTranscripts,
+    reducedMotion: settings.reducedMotion,
+  };
 }
 
 const DISTRESS_PATTERN = /\b(kill myself|suicid(?:e|al)|end my life|take my life|want to die|don['’]?t want to (?:live|be alive)|hurt myself|harm myself|self[- ]harm|not worth living|immediate danger|someone is hurting me)\b/i;
 
 function remoteVoiceProfileId(profile: VoiceboxProfile): string {
   const value = profile.id ?? profile.profile_id;
-  if (!value) throw new Error('Voicebox created a profile without returning its identifier.');
+  if (!value) throw new Error('The voice could not be prepared. Please try again.');
   return String(value);
 }
 
-function localCompanion(remote: ApiCompanion, cached?: CompanionProfile): CompanionProfile {
-  const sameCompanion = cached?.id === remote.id ? cached : undefined;
+type VoicePipelineProgress = {
+  stage: 'generating' | 'downloading';
+  status: string;
+  elapsedMs: number;
+  generationId?: string;
+};
+
+async function gatewayVoice(
+  profileId: string,
+  text: string,
+  options: {
+    signal?: AbortSignal;
+    persistent?: boolean;
+    onProgress?: (progress: VoicePipelineProgress) => void;
+  } = {},
+) {
+  const startedAt = Date.now();
+  options.onProgress?.({ stage: 'generating', status: 'queued', elapsedMs: 0 });
+  const first = await api.generateVoice({ text, profile_id: profileId }, { signal: options.signal });
+  const completed = first.audio_url
+    ? first
+    : await api.waitForVoiceGeneration(first.generation_id, {
+      signal: options.signal,
+      onProgress: (progress: VoiceGenerationProgress) => options.onProgress?.({
+        stage: 'generating',
+        status: progress.status,
+        elapsedMs: progress.elapsedMs,
+        generationId: progress.generation.generation_id,
+      }),
+    });
+  options.onProgress?.({
+    stage: 'downloading',
+    status: 'saving securely on this device',
+    elapsedMs: Date.now() - startedAt,
+    generationId: completed.generation_id,
+  });
+  const bytes = await api.voiceAudioBytes(completed.generation_id, { signal: options.signal });
+  const audioUrl = await persistGeneratedAudio(bytes, completed.generation_id, options.persistent ?? false);
+  return { id: completed.generation_id, audioUrl };
+}
+
+function companionContext(profile: CompanionProfile): LocalCompanionContext {
   return {
-    id: remote.id,
-    name: remote.name,
-    relationship: remote.relationship,
-    customRelationship: remote.custom_relationship ?? undefined,
-    voiceStatus: remote.voice_status,
-    consentAcknowledged: remote.consent_acknowledged,
-    consentAt: remote.consent_at,
-    consentNote: remote.consent_note ?? undefined,
-    voiceSampleUri: sameCompanion?.voiceSampleUri ?? remote.voice_sample_uri ?? undefined,
-    voiceSampleName: remote.voice_sample_name ?? sameCompanion?.voiceSampleName,
-    sampleTranscript: remote.sample_transcript ?? sameCompanion?.sampleTranscript,
-    voiceboxProfileId: remote.voicebox_profile_id ?? undefined,
-    avatarUri: sameCompanion?.avatarUri ?? remote.avatar_uri ?? undefined,
-    traits: remote.traits,
-    memories: remote.memories,
-    addressAs: remote.address_as ?? undefined,
-    helpfulWhen: remote.helpful_when ?? undefined,
-    avoid: remote.avoid ?? undefined,
-    createdAt: remote.created_at,
+    name: profile.name,
+    relationship: profile.relationship,
+    custom_relationship: profile.customRelationship || null,
+    voice_status: profile.voiceStatus,
+    consent_acknowledged: true,
+    ai_disclosure_acknowledged: true,
+    traits: profile.traits,
+    memories: profile.memories,
+    address_as: profile.addressAs || null,
+    helpful_when: profile.helpfulWhen || null,
+    avoid: profile.avoid || null,
   };
 }
 
-function localMessage(message: ApiChatMessage): ChatMessage {
-  return {
-    id: message.id,
-    role: message.role,
-    content: message.content,
-    modality: message.modality,
-    createdAt: message.created_at,
-    audioUri: message.audio_uri ?? undefined,
-    voiceboxGenerationId: message.voicebox_generation_id ?? undefined,
-  };
-}
-
-async function gatewayVoice(profileId: string, text: string, signal?: AbortSignal) {
-  const first = await api.generateVoice({ text, profile_id: profileId }, { signal });
-  const completed = first.audio_url ? first : await api.waitForVoiceGeneration(first.generation_id, { signal });
-  return { id: completed.generation_id, audioUrl: completed.audio_url ?? api.voiceAudioUrl(completed.generation_id) };
-}
-
-function serviceSummary(health?: HealthResponse): string {
-  if (!SAANJH_API_BASE_URL) return 'This Android build does not have a Saanjh API address yet.';
+function serviceSummary(health?: HealthResponse, baseUrl = api.baseUrl): string {
+  if (!baseUrl) return 'Add the public HTTPS address for your Saanjh backend.';
   if (!health) return 'Tap below to check the Saanjh backend and its AI voice services.';
   const groq = health.groq.status === 'ok' ? 'Groq online' : `Groq unavailable${health.groq.detail ? `: ${health.groq.detail}` : ''}`;
-  const voicebox = health.voicebox.status === 'ok' ? 'Voicebox online' : `Voicebox unavailable${health.voicebox.detail ? `: ${health.voicebox.detail}` : ''}`;
+  const voicebox = health.voicebox.status === 'ok' ? 'Voicebox service reachable' : `Voicebox unavailable${health.voicebox.detail ? `: ${health.voicebox.detail}` : ''}`;
   return `${groq} · ${voicebox}`;
 }
 
@@ -532,6 +563,7 @@ type OnboardingDraft = {
   sampleUri?: string;
   sampleName?: string;
   sampleMime?: string;
+  sampleDurationMs?: number;
   transcript: string;
   traits: string[];
   addressAs: string;
@@ -539,10 +571,20 @@ type OnboardingDraft = {
   avoid: string;
 };
 
-function OnboardingScreen({ initialSettings, onComplete, onRemoteProfileOrphaned }: { initialSettings: AppSettings; onComplete: (profile: CompanionProfile, settings: AppSettings) => void; onRemoteProfileOrphaned: (profileId: string) => void }) {
+function OnboardingScreen({ initialSettings, initialAccessToken, onSaveConnection, onComplete, onRemoteProfileOrphaned }: {
+  initialSettings: AppSettings;
+  initialAccessToken: string;
+  onSaveConnection: (baseUrl: string, accessToken: string) => Promise<void>;
+  onComplete: (profile: CompanionProfile, settings: AppSettings) => void;
+  onRemoteProfileOrphaned: (profileId: string) => void;
+}) {
   const [step, setStep] = useState(0);
   const [draft, setDraft] = useState<OnboardingDraft>({ name: '', customRelationship: '', consentAcknowledged: false, consentNote: '', transcript: '', traits: [], addressAs: '', helpfulWhen: '', avoid: '' });
-  const [settings] = useState<AppSettings>(() => sanitizedSettings(initialSettings));
+  const [settings, setSettings] = useState<AppSettings>(() => ({
+    ...sanitizedSettings(initialSettings),
+    apiBaseUrl: initialSettings.apiBaseUrl.trim() || SAANJH_API_BASE_URL,
+  }));
+  const [accessToken, setAccessToken] = useState(initialAccessToken);
   const [health, setHealth] = useState<HealthResponse>();
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
@@ -559,6 +601,14 @@ function OnboardingScreen({ initialSettings, onComplete, onRemoteProfileOrphaned
 
   const update = (patch: Partial<OnboardingDraft>) => setDraft((current) => ({ ...current, ...patch }));
 
+  const applyConnection = async () => {
+    const baseUrl = settings.apiBaseUrl.trim();
+    if (!baseUrl) throw new Error('Add the public HTTPS address for your Saanjh backend first.');
+    configureSaanjhApi({ baseUrl, accessToken });
+    await onSaveConnection(baseUrl, accessToken);
+    return baseUrl;
+  };
+
   const pickAvatar = async () => {
     const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], allowsEditing: true, aspect: [1, 1], quality: 0.8 });
     if (!result.canceled && result.assets[0]?.uri) update({ avatarUri: result.assets[0].uri });
@@ -567,10 +617,15 @@ function OnboardingScreen({ initialSettings, onComplete, onRemoteProfileOrphaned
   const toggleRecord = async () => {
     setError('');
     if (recorderState.isRecording) {
+      const durationMillis = recorderState.durationMillis;
       await recorder.stop();
       recordingActiveRef.current = false;
       await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true });
-      if (recorder.uri) update({ sampleUri: recorder.uri, sampleName: `saanjh-sample-${Date.now()}.${Platform.OS === 'web' ? 'webm' : 'm4a'}`, sampleMime: Platform.OS === 'web' ? 'audio/webm' : 'audio/mp4', transcript: '' });
+      if (durationMillis < 5_500) {
+        setError('Record at least 6 seconds of clear speech before cloning your voice.');
+        return;
+      }
+      if (recorder.uri) update({ sampleUri: recorder.uri, sampleName: `saanjh-sample-${Date.now()}.${Platform.OS === 'web' ? 'webm' : 'm4a'}`, sampleMime: Platform.OS === 'web' ? 'audio/webm' : 'audio/mp4', sampleDurationMs: durationMillis, transcript: '' });
       return;
     }
     const permission = await requestRecordingPermissionsAsync();
@@ -595,7 +650,7 @@ function OnboardingScreen({ initialSettings, onComplete, onRemoteProfileOrphaned
     const result = await DocumentPicker.getDocumentAsync({ type: 'audio/*', copyToCacheDirectory: true });
     if (!result.canceled && result.assets[0]) {
       const asset = result.assets[0];
-      update({ sampleUri: asset.uri, sampleName: asset.name, sampleMime: asset.mimeType ?? guessMime(asset.name), transcript: '' });
+      update({ sampleUri: asset.uri, sampleName: asset.name, sampleMime: asset.mimeType ?? guessMime(asset.name), sampleDurationMs: undefined, transcript: '' });
     }
   };
 
@@ -603,8 +658,11 @@ function OnboardingScreen({ initialSettings, onComplete, onRemoteProfileOrphaned
     if (!draft.sampleUri || !draft.sampleName) return;
     setBusy('Transcribing the real sample…'); setError('');
     try {
+      await applyConnection();
       const file = await makeAudioFile(draft.sampleUri, draft.sampleName, draft.sampleMime);
-      const transcript = await api.transcribe(file);
+      const transcript = await api.transcribe(file, {}, {
+        onUploadProgress: (progress) => setBusy(fileTransferLabel(progress, 'Listening carefully to the sample…')),
+      });
       update({ transcript });
       void haptic('success');
     } catch (e) { setError(displayError(e)); } finally { setBusy(''); }
@@ -613,9 +671,10 @@ function OnboardingScreen({ initialSettings, onComplete, onRemoteProfileOrphaned
   const testServices = async () => {
     setBusy('Checking Saanjh services…'); setError('');
     try {
+      const baseUrl = await applyConnection();
       const current = await api.health();
       setHealth(current);
-      if (current.status !== 'ok') throw new Error(serviceSummary(current));
+      if (current.status !== 'ok') throw new Error(serviceSummary(current, baseUrl));
       void haptic('success');
     } catch (e) { setError(displayError(e)); } finally { setBusy(''); }
   };
@@ -625,6 +684,7 @@ function OnboardingScreen({ initialSettings, onComplete, onRemoteProfileOrphaned
     if (step === 1 && (!draft.name.trim() || !draft.relationship || (draft.relationship === 'other' && !draft.customRelationship.trim()))) return 'Add a name and relationship.';
     if (step === 2 && (!draft.consentAcknowledged || ((draft.voiceStatus === 'consented' || draft.voiceStatus === 'memorial') && !draft.consentNote.trim()))) return 'Complete the consent acknowledgement and authority note before continuing.';
     if (step === 3 && recorderState.isRecording) return 'Stop the recording before continuing.';
+    if (step === 3 && draft.sampleDurationMs !== undefined && draft.sampleDurationMs < 5_500) return 'Record at least 6 seconds of clear speech before cloning your voice.';
     if (step === 3 && (!draft.sampleUri || !draft.sampleName || !draft.transcript.trim())) return 'Record or import a sample and confirm its exact words.';
     return '';
   };
@@ -643,40 +703,41 @@ function OnboardingScreen({ initialSettings, onComplete, onRemoteProfileOrphaned
     let savedAvatarUri: string | undefined;
     try {
       if (syncVoice) {
-        const voiceProfile = await api.createVoiceboxProfile({ name: draft.name.trim(), language: 'en', voice_type: 'cloned' });
-        voiceboxProfileId = remoteVoiceProfileId(voiceProfile);
+        await applyConnection();
         const file = await makeAudioFile(draft.sampleUri, draft.sampleName, draft.sampleMime);
-        await api.uploadVoiceSample(voiceboxProfileId, file, draft.transcript.trim());
+        const voiceProfile = await api.createVoiceboxProfileWithSample(
+          { name: draft.name.trim(), language: 'en', voice_type: 'cloned' },
+          file,
+          draft.transcript.trim(),
+          {
+            onUploadProgress: (progress) => setBusy(fileTransferLabel(progress, 'Preparing the familiar AI voice…')),
+          },
+        );
+        voiceboxProfileId = remoteVoiceProfileId(voiceProfile);
       }
       savedSampleUri = await persistMediaUri(draft.sampleUri, draft.sampleName, draft.sampleMime ?? guessMime(draft.sampleName));
       savedAvatarUri = draft.avatarUri ? await persistMediaUri(draft.avatarUri, 'companion-avatar.jpg', 'image/jpeg') : undefined;
       const consentAt = now();
-      const remote = await api.createCompanion({
+      const profile: CompanionProfile = {
         id: uid('companion'),
         name: draft.name.trim(),
         relationship: draft.relationship,
-        custom_relationship: draft.customRelationship.trim() || null,
-        voice_status: draft.voiceStatus,
-        consent_acknowledged: true,
-        consent_at: consentAt,
-        consent_note: draft.consentNote.trim() || null,
-        ai_disclosure_acknowledged: true,
-        disclosure_text: AI_DISCLOSURE,
-        voice_sample_uri: null,
-        voice_sample_name: draft.sampleName,
-        sample_transcript: draft.transcript.trim(),
-        voicebox_profile_id: voiceboxProfileId ?? null,
-        avatar_uri: null,
+        customRelationship: draft.customRelationship.trim() || undefined,
+        voiceStatus: draft.voiceStatus,
+        consentAcknowledged: true,
+        consentAt,
+        consentNote: draft.consentNote.trim() || undefined,
+        voiceSampleUri: savedSampleUri,
+        voiceSampleName: draft.sampleName,
+        sampleTranscript: draft.transcript.trim(),
+        voiceboxProfileId,
+        avatarUri: savedAvatarUri,
         traits: draft.traits,
         memories: [],
-        address_as: draft.addressAs.trim() || null,
-        helpful_when: draft.helpfulWhen.trim() || null,
+        addressAs: draft.addressAs.trim() || undefined,
+        helpfulWhen: draft.helpfulWhen.trim() || undefined,
         avoid: draft.avoid.trim() || undefined,
-      });
-      const profile = {
-        ...localCompanion(remote),
-        voiceSampleUri: savedSampleUri,
-        avatarUri: savedAvatarUri,
+        createdAt: consentAt,
       };
       void haptic('success');
       onComplete(profile, settings);
@@ -688,7 +749,7 @@ function OnboardingScreen({ initialSettings, onComplete, onRemoteProfileOrphaned
         try { await api.deleteVoiceboxProfile(voiceboxProfileId); }
         catch {
           onRemoteProfileOrphaned(voiceboxProfileId);
-          cleanup = ` The partially created Voicebox profile (${voiceboxProfileId}) was saved to the cleanup queue.`;
+          cleanup = ' A private cleanup will be retried automatically from Settings.';
         }
       }
       setError(`${displayError(e)}${cleanup}`);
@@ -744,16 +805,28 @@ function OnboardingScreen({ initialSettings, onComplete, onRemoteProfileOrphaned
           </View> : null}
 
           {step === 3 ? <View style={s.stack}>
-            <Text style={s.lead}>Use 10–30 seconds of clear speech with no music or other voices. The transcript must match exactly.</Text>
+            <Text style={s.lead}>Use 5–10 seconds of clear speech with no music or other voices. A shorter clean sample responds faster, and the transcript must match exactly.</Text>
             <View style={s.sampleGrid}>
-              <Pressable onPress={toggleRecord} style={[s.sampleAction, recorderState.isRecording && s.sampleActionRecording]}>
-                {recorderState.isRecording ? <Square size={26} fill={C.inverse} color={C.inverse} /> : <Mic size={28} color={C.plum700} />}
-                <Text style={[s.sampleActionTitle, recorderState.isRecording && { color: C.inverse }]}>{recorderState.isRecording ? `Stop · ${Math.round(recorderState.durationMillis / 1000)}s` : 'Record sample'}</Text>
-              </Pressable>
-              <Pressable onPress={pickAudio} disabled={recorderState.isRecording} style={[s.sampleAction, recorderState.isRecording && s.buttonDisabled]}>
-                <Upload size={28} color={C.plum700} />
-                <Text style={s.sampleActionTitle}>Import audio</Text>
-              </Pressable>
+              <BotanicalSampleActionCard
+                variant="record"
+                title={recorderState.isRecording ? `Stop · ${Math.round(recorderState.durationMillis / 1000)}s` : 'Record sample'}
+                subtitle={recorderState.isRecording ? 'Tap when you are finished' : 'Use your microphone'}
+                eyebrow="RECORD"
+                icon={recorderState.isRecording ? <Square size={25} fill={C.inverse} color={C.inverse} /> : <Mic size={27} color={C.plum700} />}
+                onPress={() => { void toggleRecord(); }}
+                active={recorderState.isRecording}
+                reducedMotion={initialSettings.reducedMotion}
+              />
+              <BotanicalSampleActionCard
+                variant="import"
+                title="Import audio"
+                subtitle="Choose a saved recording"
+                eyebrow="IMPORT"
+                icon={<Upload size={27} color={C.plum700} />}
+                onPress={() => { void pickAudio(); }}
+                disabled={recorderState.isRecording}
+                reducedMotion={initialSettings.reducedMotion}
+              />
             </View>
             {draft.sampleUri ? <View style={s.sampleReady}>
               <FileAudio size={21} color={C.success} />
@@ -761,8 +834,8 @@ function OnboardingScreen({ initialSettings, onComplete, onRemoteProfileOrphaned
               <IconButton label="Play sample" onPress={() => { samplePlayer.seekTo(0); samplePlayer.play(); }}><Play size={19} color={C.plum700} fill={C.plum700} /></IconButton>
             </View> : null}
             <Field label="EXACT WORDS IN THE SAMPLE" value={draft.transcript} onChangeText={(transcript) => update({ transcript })} placeholder="Type or transcribe exactly what is spoken" multiline />
-            {draft.sampleUri ? <Button secondary label="Transcribe through Saanjh" onPress={transcribe} icon={<AudioLines size={19} color={C.plum700} />} /> : null}
-            <Text style={s.helper}>The recording is sent to your Saanjh backend, which privately forwards it to Voicebox.</Text>
+            {draft.sampleUri ? <Button secondary label="Transcribe sample" onPress={transcribe} icon={<AudioLines size={19} color={C.plum700} />} /> : null}
+            <Text style={s.helper}>The sample is used only to create the AI voice you approved.</Text>
           </View> : null}
 
           {step === 4 ? <View style={s.stack}>
@@ -776,14 +849,9 @@ function OnboardingScreen({ initialSettings, onComplete, onRemoteProfileOrphaned
           </View> : null}
 
           {step === 5 ? <View style={s.stack}>
-            <Text style={s.lead}>Your phone connects only to the Saanjh backend. Groq credentials and Voicebox stay off this device.</Text>
-            <View style={s.serviceCard}>
-              <View style={s.serviceTitleRow}><ShieldCheck size={21} color={C.plum700} /><Text style={s.serviceTitle}>Saanjh API gateway</Text></View>
-              <Notice title="Android backend" body={SAANJH_API_BASE_URL || 'Not configured in this build'} tone={SAANJH_API_BASE_URL ? 'lavender' : 'peach'} />
-              <Notice title={health?.status === 'ok' ? 'All services online' : 'Connection status'} body={serviceSummary(health)} tone={health && health.status !== 'ok' ? 'peach' : 'lavender'} />
-              <Button secondary label="Check backend services" onPress={() => { void testServices(); }} disabled={Boolean(busy)} icon={<Wifi size={18} color={C.plum700} />} />
-            </View>
-            <Notice icon={<LockKeyhole size={21} color={C.plum500} />} title="Secrets stay server-side" body="This app never asks for or stores your Groq API key or a Voicebox address." />
+            <Text style={s.lead}>Your companion is ready. Saanjh connects privately and automatically whenever an AI response is needed.</Text>
+            <Image source={homeArt} style={s.readyArt} />
+            <Notice icon={<ShieldCheck size={21} color={C.plum500} />} title="Private by design" body="Your journal, moods, and companion notes stay on this phone. Voice and AI processing happens only when you choose to use it." />
           </View> : null}
           </Reveal>
 
@@ -826,6 +894,7 @@ function TabBar({ active, onNavigate, reducedMotion }: { active: TabRoute; onNav
   const tabs: Array<{ id: TabRoute; label: string; icon: typeof Home }> = [
     { id: 'today', label: 'Today', icon: Home },
     { id: 'companion', label: 'Companion', icon: UserRound },
+    { id: 'rituals', label: 'Rituals', icon: Sparkles },
     { id: 'journal', label: 'Journal', icon: BookOpen },
     { id: 'settings', label: 'Settings', icon: SettingsIcon },
   ];
@@ -853,7 +922,7 @@ function TodayScreen({ data, go, start }: { data: AppData; go: (route: Route) =>
       <View style={s.heroCardCopy}>
         <AIChip label={companion.voiceStatus === 'memorial' ? 'AI memorial voice' : 'AI-generated voice'} />
         <Text style={s.cardDisplay} numberOfLines={1} ellipsizeMode="tail">{companion.name}</Text>
-        <Text style={s.cardBody}>{companion.voiceboxProfileId ? 'Voice ready through Saanjh.' : 'Profile saved. Voice cloning still needs backend sync.'}</Text>
+        <Text style={s.cardBody}>{companion.voiceboxProfileId ? 'Ready for a mindful conversation.' : 'Finish the voice setup when you feel ready.'}</Text>
         <Pressable accessibilityRole="button" accessibilityLabel="Start voice session" onPress={() => go('precall')} style={s.compactCall}><Phone size={19} color={C.inverse} fill={C.inverse} /><Text style={s.compactCallText}>Start voice session</Text></Pressable>
       </View>
     </ImageBackground>
@@ -862,8 +931,8 @@ function TodayScreen({ data, go, start }: { data: AppData; go: (route: Route) =>
     <Reveal delay={270} disabled={data.settings.reducedMotion}>
       <Text style={s.sectionTitle}>For right now</Text>
       <View style={s.actionGrid}>
-        <Pressable accessibilityRole="button" accessibilityLabel="Check in" style={({ pressed }) => [s.actionCard, pressed && s.pressed]} onPress={() => go('mood')}><View style={s.actionIcon}><Heart size={21} color={C.plum700} /></View><Text style={s.actionTitle}>Check in</Text><Text style={s.actionBody}>Name how you feel.</Text><ChevronRight style={s.actionChevron} size={18} color={C.textSecondary} /></Pressable>
-        <Pressable accessibilityRole="button" accessibilityLabel="Start text chat" style={({ pressed }) => [s.actionCard, pressed && s.pressed]} onPress={() => start('text')}><View style={[s.actionIcon, { backgroundColor: C.peach100 }]}><MessageCircle size={21} color={C.warning} /></View><Text style={s.actionTitle}>Text chat</Text><Text style={s.actionBody}>Write, then hear the reply.</Text><ChevronRight style={s.actionChevron} size={18} color={C.textSecondary} /></Pressable>
+        <BotanicalActionCard accessibilityLabel="Check in" art={moodArt} icon={<Heart size={21} color={C.plum700} />} onPress={() => go('mood')} subtitle="Name how you feel." title="Check in" />
+        <BotanicalActionCard accessibilityLabel="Start text chat" art={journalArt} icon={<MessageCircle size={21} color={C.warning} />} onPress={() => start('text')} subtitle="Write, then hear the reply." title="Text chat" tone="clay" />
       </View>
       <Pressable accessibilityRole="button" accessibilityLabel="Open journal" style={({ pressed }) => [s.journalBanner, pressed && s.pressed]} onPress={() => go('journal')}><BookHeart size={22} color={C.plum700} /><View style={{ flex: 1 }}><Text style={s.journalBannerTitle}>{data.journal.length ? 'Return to your journal' : 'Your journal is empty'}</Text><Text style={s.journalBannerBody}>{data.journal.length ? 'Only the notes you chose to save.' : 'Write something for yourself—nothing is auto-created.'}</Text></View><ChevronRight size={20} color={C.textSecondary} /></Pressable>
     </Reveal>
@@ -901,51 +970,56 @@ function JournalScreen({ entries, onAdd, onDelete }: { entries: JournalEntry[]; 
   </>;
 }
 
-function CompanionScreen({ data, updateProfile, go, onRemoteProfileOrphaned }: { data: AppData; updateProfile: (profile?: CompanionProfile) => void; go: (route: Route) => void; onRemoteProfileOrphaned: (profileId: string) => void }) {
+function CompanionScreen({ data, updateProfile, go }: { data: AppData; updateProfile: (profile?: CompanionProfile) => void; go: (route: Route) => void; onRemoteProfileOrphaned: (profileId: string) => void }) {
   const profile = data.companion!;
   const [memory, setMemory] = useState(''); const [busy, setBusy] = useState(''); const [error, setError] = useState('');
   const player = useAudioPlayer(null);
   const syncVoice = async () => {
     if (!profile.voiceSampleUri || !profile.voiceSampleName || !profile.sampleTranscript) { setError('The saved sample and its exact transcript are required before syncing.'); return; }
-    setBusy('Sending the consented sample through Saanjh…'); setError('');
-    let remoteId: string | undefined;
+    setBusy('Preparing the consented voice…'); setError('');
     try {
-      const voiceProfile = await api.createVoiceboxProfile({ name: profile.name, language: 'en', voice_type: 'cloned' });
-      remoteId = remoteVoiceProfileId(voiceProfile);
       const file = await makeAudioFile(profile.voiceSampleUri, profile.voiceSampleName);
-      await api.uploadVoiceSample(remoteId, file, profile.sampleTranscript);
-      const remote = await api.updateCompanion(profile.id, { voicebox_profile_id: remoteId });
-      updateProfile(localCompanion(remote, profile));
+      const voiceProfile = await api.createVoiceboxProfileWithSample(
+        { name: profile.name, language: 'en', voice_type: 'cloned' },
+        file,
+        profile.sampleTranscript,
+        {
+          onUploadProgress: (progress) => setBusy(fileTransferLabel(progress, 'Preparing the familiar AI voice…')),
+        },
+      );
+      const remoteId = remoteVoiceProfileId(voiceProfile);
+      updateProfile({ ...profile, voiceboxProfileId: remoteId });
       void haptic('success');
     } catch (e) {
-      let cleanup = '';
-      if (remoteId) {
-        try { await api.deleteVoiceboxProfile(remoteId); }
-        catch { onRemoteProfileOrphaned(remoteId); cleanup = ` The partially created profile (${remoteId}) was added to the cleanup queue.`; }
-      }
-      setError(`${displayError(e)}${cleanup}`);
+      setError(displayError(e));
     } finally { setBusy(''); }
   };
   const preview = async () => {
     if (!profile.voiceboxProfileId) { setError('Sync the companion voice first.'); return; }
     if (!profile.sampleTranscript?.trim()) { setError('The real sample transcript is required for a preview.'); return; }
     setBusy('Generating a real AI voice preview…'); setError('');
-    try { const result = await gatewayVoice(profile.voiceboxProfileId, profile.sampleTranscript.trim()); player.replace(result.audioUrl); player.play(); }
-    catch (e) { setError(displayError(e)); } finally { setBusy(''); }
+    try {
+      const result = await gatewayVoice(profile.voiceboxProfileId, profile.sampleTranscript.trim(), { persistent: false });
+      player.replace(result.audioUrl);
+      player.play();
+    } catch (e) {
+      const message = displayError(e);
+      if (/profile.+not found|voice profile.+missing/i.test(message)) updateProfile({ ...profile, voiceboxProfileId: undefined });
+      setError(message);
+    } finally { setBusy(''); }
   };
   const saveMemories = async (memories: string[]) => {
-    setBusy('Saving companion notes…'); setError('');
-    try { const remote = await api.updateCompanion(profile.id, { memories }); updateProfile(localCompanion(remote, profile)); void haptic('success'); }
-    catch (e) { setError(displayError(e)); }
-    finally { setBusy(''); }
+    setError('');
+    updateProfile({ ...profile, memories });
+    void haptic('success');
   };
   const addMemory = async () => { if (!memory.trim()) return; const next = [memory.trim(), ...profile.memories]; await saveMemories(next); setMemory(''); };
   return <ScrollView contentContainerStyle={s.mainPage} keyboardShouldPersistTaps="handled">
     <PageHeader eyebrow="YOUR COMPANION" title={profile.name} right={<AIChip label={profile.voiceStatus === 'memorial' ? 'AI memorial' : 'AI voice'} />} />
     <View style={s.profileHero}><ArtworkAvatar uri={profile.avatarUri} size={148} /><View style={s.profileStatus}><ShieldCheck size={15} color={C.success} /><Text style={s.profileStatusText}>{profile.voiceStatus === 'self' ? 'Your own voice' : profile.voiceStatus === 'consented' ? 'Consent recorded' : 'AI memorial voice'}</Text></View></View>
     <Notice title="Always AI-generated" body={profile.voiceStatus === 'memorial' ? `This is an AI memorial voice inspired by ${profile.name}, never the actual person.` : `Saanjh must never claim to literally be ${profile.name}.`} />
-    <View style={s.voicePanel}><View style={{ flex: 1 }}><Text style={s.voicePanelTitle}>AI voice</Text><Text style={s.voicePanelBody}>{profile.voiceboxProfileId ? 'Cloned profile is linked through Saanjh.' : 'The sample is on this device. Send it through Saanjh to clone it.'}</Text></View><View style={[s.statusDot, !profile.voiceboxProfileId && s.statusDotOff]} /></View>
-    {profile.voiceboxProfileId ? <Button label="Generate real preview" onPress={() => { void preview(); }} disabled={Boolean(busy)} icon={<Volume2 size={19} color={C.inverse} />} /> : <Button label="Send sample through Saanjh" onPress={() => { void syncVoice(); }} disabled={Boolean(busy)} icon={<Wifi size={19} color={C.inverse} />} />}
+    <View style={s.voicePanel}><View style={{ flex: 1 }}><Text style={s.voicePanelTitle}>AI voice</Text><Text style={s.voicePanelBody}>{profile.voiceboxProfileId ? 'Your familiar AI voice is ready.' : 'Your sample is safe on this phone and ready to prepare.'}</Text></View><View style={[s.statusDot, !profile.voiceboxProfileId && s.statusDotOff]} /></View>
+    {profile.voiceboxProfileId ? <Button label="Hear a voice preview" onPress={() => { void preview(); }} disabled={Boolean(busy)} icon={<Volume2 size={19} color={C.inverse} />} /> : <Button label="Prepare AI voice" onPress={() => { void syncVoice(); }} disabled={Boolean(busy)} icon={<Sparkles size={19} color={C.inverse} />} />}
     {busy ? <View style={s.busyRow}><ActivityIndicator color={C.plum700} /><Text style={s.busyText}>{busy}</Text></View> : null}
     {error ? <View style={s.errorBox}><CircleAlert size={18} color={C.danger} /><Text style={s.errorText}>{error}</Text></View> : null}
     <Text style={s.sectionTitle}>How they support you</Text>
@@ -954,48 +1028,51 @@ function CompanionScreen({ data, updateProfile, go, onRemoteProfileOrphaned }: {
     <Text style={s.helper}>Only details you enter here are allowed into the AI prompt.</Text>
     <View style={s.inlineInput}><TextInput value={memory} onChangeText={setMemory} placeholder="Add one real detail" placeholderTextColor={C.placeholder} style={s.inlineTextInput} /><Pressable accessibilityRole="button" accessibilityLabel="Add approved memory" onPress={() => { void addMemory(); }} style={s.inlineAdd}><Plus size={20} color={C.inverse} /></Pressable></View>
     {profile.memories.length ? profile.memories.map((item, index) => <View key={`${item}-${index}`} style={s.memoryRow}><BookHeart size={18} color={C.plum500} /><Text style={s.memoryText}>{item}</Text><IconButton label="Remove memory" onPress={() => { void saveMemories(profile.memories.filter((_, i) => i !== index)); }}><X size={17} color={C.textSecondary} /></IconButton></View>) : <Text style={s.emptyInline}>No memories saved.</Text>}
-    <Button secondary label="Connection & privacy settings" onPress={() => go('settings')} icon={<SettingsIcon size={18} color={C.plum700} />} />
+    <Button secondary label="App settings" onPress={() => go('settings')} icon={<SettingsIcon size={18} color={C.plum700} />} />
   </ScrollView>;
 }
 
-function SettingsScreen({ data, onSave, onSafety, onDeleteCompanion, onReset, onRetryRemoteCleanup }: { data: AppData; onSave: (settings: AppSettings) => void; onSafety: () => void; onDeleteCompanion: () => void; onReset: () => void; onRetryRemoteCleanup: () => Promise<string> }) {
-  const [settings, setSettings] = useState<AppSettings>(() => sanitizedSettings(data.settings)); const [busy, setBusy] = useState(''); const [result, setResult] = useState(''); const [health, setHealth] = useState<HealthResponse>();
+function SettingsScreen({ data, initialAccessToken, onSave, onSafety, onDeleteCompanion, onReset, onRetryRemoteCleanup }: {
+  data: AppData;
+  initialAccessToken: string;
+  onSave: (settings: AppSettings, accessToken: string) => Promise<void>;
+  onSafety: () => void;
+  onDeleteCompanion: () => void;
+  onReset: () => void;
+  onRetryRemoteCleanup: () => Promise<string>;
+}) {
+  const [settings, setSettings] = useState<AppSettings>(() => sanitizedSettings(data.settings)); const [accessToken, setAccessToken] = useState(initialAccessToken); const [busy, setBusy] = useState(''); const [result, setResult] = useState(''); const [health, setHealth] = useState<HealthResponse>();
   const update = (patch: Partial<AppSettings>) => setSettings((current) => ({ ...current, ...patch }));
-  const testServices = async () => { setBusy('Testing Saanjh services…'); setResult(''); try { const current = await api.health(); setHealth(current); setResult(serviceSummary(current)); } catch (e) { setResult(displayError(e)); } finally { setBusy(''); } };
+  const testServices = async () => { setBusy('Testing Saanjh services…'); setResult(''); try { configureSaanjhApi({ baseUrl: settings.apiBaseUrl, accessToken }); const current = await api.health(); setHealth(current); setResult(serviceSummary(current, settings.apiBaseUrl)); } catch (e) { setResult(displayError(e)); } finally { setBusy(''); } };
+  const saveSettings = async () => { setBusy('Saving securely on this phone…'); setResult(''); try { await onSave(sanitizedSettings(settings), accessToken); setResult('Connection and privacy settings saved on this phone.'); void haptic('success'); } catch (e) { setResult(displayError(e)); } finally { setBusy(''); } };
   return <ScrollView contentContainerStyle={s.mainPage} keyboardShouldPersistTaps="handled">
     <PageHeader eyebrow="CONTROL & TRANSPARENCY" title="Settings" />
-    <Text style={s.sectionTitle}>Connections</Text>
-    <Notice title="Saanjh API gateway" body={SAANJH_API_BASE_URL || 'Not configured in this Android build'} tone={SAANJH_API_BASE_URL ? 'lavender' : 'peach'} />
-    <Notice title={health?.status === 'ok' ? 'All services online' : 'Backend-managed services'} body={health ? serviceSummary(health) : 'Groq and Voicebox are configured on the backend. No secret or Voicebox address is stored on this phone.'} tone={health && health.status !== 'ok' ? 'peach' : 'lavender'} />
-    <Button secondary label="Check backend services" onPress={() => { void testServices(); }} disabled={Boolean(busy)} />
-    {busy ? <View style={s.busyRow}><ActivityIndicator color={C.plum700} /><Text style={s.busyText}>{busy}</Text></View> : null}
-    {result ? <Notice title="Connection result" body={result} tone={result.includes('reachable') || result.includes('healthy') ? 'lavender' : 'peach'} /> : null}
     <Text style={s.sectionTitle}>Privacy & accessibility</Text>
     <View style={s.switchRow}><View style={{ flex: 1 }}><Text style={s.switchTitle}>Keep session transcripts</Text><Text style={s.switchBody}>Off by default. When off, spoken and typed turns are discarded after the session.</Text></View><Switch value={settings.allowTranscripts} onValueChange={(allowTranscripts) => update({ allowTranscripts })} trackColor={{ false: C.fog, true: C.sage }} thumbColor={settings.allowTranscripts ? C.plum700 : C.ivory} /></View>
     <View style={s.switchRow}><View style={{ flex: 1 }}><Text style={s.switchTitle}>Reduce ambient motion</Text><Text style={s.switchBody}>Stops breathing and waveform animation where possible.</Text></View><Switch value={settings.reducedMotion} onValueChange={(reducedMotion) => update({ reducedMotion })} trackColor={{ false: C.fog, true: C.sage }} thumbColor={settings.reducedMotion ? C.plum700 : C.ivory} /></View>
-    <Button label="Save settings" onPress={() => { onSave(sanitizedSettings(settings)); void haptic('success'); }} />
+    <Button label="Save settings" onPress={() => { void saveSettings(); }} disabled={Boolean(busy)} />
     <Text style={s.sectionTitle}>Safety & data</Text>
-    {data.pendingVoiceboxProfileIds.length ? <><Notice tone="peach" title="Remote cleanup pending" body={`${data.pendingVoiceboxProfileIds.length} partially created Voicebox profile${data.pendingVoiceboxProfileIds.length === 1 ? '' : 's'} still need deletion.`} /><Button secondary label="Retry Voicebox cleanup" onPress={() => { setBusy('Cleaning up Voicebox…'); void onRetryRemoteCleanup().then(setResult).finally(() => setBusy('')); }} disabled={Boolean(busy)} /></> : null}
+    {data.pendingVoiceboxProfileIds.length ? <><Notice tone="peach" title="Voice cleanup pending" body="An interrupted voice setup still needs to be removed securely." /><Button secondary label="Retry secure cleanup" onPress={() => { setBusy('Cleaning up securely…'); void onRetryRemoteCleanup().then(setResult).finally(() => setBusy('')); }} disabled={Boolean(busy)} /></> : null}
     <Pressable accessibilityRole="button" accessibilityLabel="Immediate support" style={s.settingsRow} onPress={onSafety}><LifeBuoy size={21} color={C.plum700} /><View style={{ flex: 1 }}><Text style={s.settingsRowTitle}>Immediate support</Text><Text style={s.settingsRowBody}>Emergency guidance and AI limitations.</Text></View><ChevronRight size={20} color={C.textSecondary} /></Pressable>
-    <Pressable accessibilityRole="button" accessibilityLabel="Delete companion and cloned profile" style={s.settingsRow} onPress={onDeleteCompanion}><Trash2 size={21} color={C.danger} /><View style={{ flex: 1 }}><Text style={s.settingsRowTitle}>Delete companion and cloned profile</Text><Text style={s.settingsRowBody}>The backend deletes remote voice data first, then clears the local cache.</Text></View><ChevronRight size={20} color={C.textSecondary} /></Pressable>
+    <Pressable accessibilityRole="button" accessibilityLabel="Delete companion and AI voice" style={s.settingsRow} onPress={onDeleteCompanion}><Trash2 size={21} color={C.danger} /><View style={{ flex: 1 }}><Text style={s.settingsRowTitle}>Delete companion and AI voice</Text><Text style={s.settingsRowBody}>Securely removes the created voice, then clears its data from this phone.</Text></View><ChevronRight size={20} color={C.textSecondary} /></Pressable>
     <Pressable accessibilityRole="button" accessibilityLabel="Reset all local Saanjh data" style={s.settingsRow} onPress={onReset}><RefreshCw size={21} color={C.danger} /><View style={{ flex: 1 }}><Text style={s.settingsRowTitle}>Reset all local Saanjh data</Text><Text style={s.settingsRowBody}>Removes settings, moods, journal, and session history from this device.</Text></View><ChevronRight size={20} color={C.textSecondary} /></Pressable>
-    <Notice tone="peach" icon={<LockKeyhole size={21} color={C.warning} />} title="Prototype storage is not encrypted" body="Local preferences and cached companion data use device storage. API keys are never stored in the Android app." />
+    <Notice icon={<LockKeyhole size={21} color={C.plum500} />} title="Stored on this phone" body="Companion notes, journals, moods, and session history stay in this app's private device storage." />
   </ScrollView>;
 }
 
 function PreCallScreen({ data, onBack, onStart }: { data: AppData; onBack: () => void; onStart: (intention: string, moodScore?: 1 | 2 | 3 | 4 | 5) => void }) {
   const [intention, setIntention] = useState(''); const [moodScore, setMoodScore] = useState<1 | 2 | 3 | 4 | 5>(); const profile = data.companion!;
-  const ready = Boolean(profile.voiceboxProfileId && SAANJH_API_BASE_URL);
+  const ready = Boolean(profile.voiceboxProfileId && data.settings.apiBaseUrl);
   return <SafeAreaView style={s.safe}><StatusBar style="dark" /><ScrollView contentContainerStyle={s.mainPage} keyboardShouldPersistTaps="handled">
     <PageHeader onBack={onBack} eyebrow="BEFORE THE SESSION" title="You're in control." />
     <View style={s.preCallProfile}><View style={s.preCallAura}><AmbientRings size={136} active={!data.settings.reducedMotion} /></View><ArtworkAvatar uri={profile.avatarUri} size={104} /><View style={{ flex: 1 }}><Text style={s.preCallName} numberOfLines={1} ellipsizeMode="tail">{profile.name}</Text><AIChip label={profile.voiceStatus === 'memorial' ? 'AI memorial voice' : 'AI-generated voice'} /></View></View>
     <Text style={s.fieldLabel}>HOW ARE YOU ARRIVING? · OPTIONAL</Text>
     <View style={s.moodRow}>{MOODS.map((mood) => <MoodOption key={mood.score} mood={mood} selected={moodScore === mood.score} reducedMotion={data.settings.reducedMotion} onPress={() => setMoodScore(mood.score)} />)}</View>
     <Field label="WHAT WOULD HELP RIGHT NOW?" value={intention} onChangeText={setIntention} placeholder="Optional—such as “I need to talk it through”" multiline />
-    <View style={s.readinessList}><View style={s.readinessRow}>{profile.voiceboxProfileId ? <Wifi size={20} color={C.success} /> : <WifiOff size={20} color={C.warning} />}<Text style={s.readinessText}>{profile.voiceboxProfileId ? 'Cloned voice profile linked' : 'Voice profile still needs backend sync'}</Text></View><View style={s.readinessRow}>{SAANJH_API_BASE_URL ? <Wifi size={20} color={C.success} /> : <WifiOff size={20} color={C.warning} />}<Text style={s.readinessText}>{SAANJH_API_BASE_URL ? 'Saanjh backend configured' : 'Android backend address missing'}</Text></View></View>
-    <Notice tone="night" icon={<ShieldCheck size={21} color={C.peach300} />} title="This is a turn-based AI session" body="Saanjh records only after you tap. The backend transcribes, creates the AI reply, and generates speech. It is not the person and not a live phone call." />
+    <View style={s.readinessList}><View style={s.readinessRow}>{profile.voiceboxProfileId ? <Check size={20} color={C.success} /> : <CircleAlert size={20} color={C.warning} />}<Text style={s.readinessText}>{profile.voiceboxProfileId ? 'Your AI voice is ready' : 'Finish creating the AI voice first'}</Text></View></View>
+    <Notice tone="night" icon={<ShieldCheck size={21} color={C.peach300} />} title="This is a turn-based AI session" body="Saanjh listens only after you tap, then prepares an AI reply in the familiar voice. It is not the person and not a live phone call." />
     <Button label="Start AI voice session" onPress={() => onStart(intention.trim(), moodScore)} disabled={!ready} icon={<Phone size={19} color={C.inverse} fill={C.inverse} />} />
-    {!ready ? <Text style={s.helperCentered}>Finish the missing connection in Companion or Settings first.</Text> : null}
+    {!ready ? <Text style={s.helperCentered}>Finish the voice setup from Companion first.</Text> : null}
   </ScrollView></SafeAreaView>;
 }
 
@@ -1014,15 +1091,15 @@ function Wave({ active, reducedMotion }: { active: boolean; reducedMotion: boole
   return <View style={s.wave}>{values.map((value, index) => <Animated.View key={index} style={[s.waveBar, { height: 18 + ((index * 17) % 44), transform: [{ scaleY: value }] }]} />)}</View>;
 }
 
-type SessionPhase = 'ready' | 'recording' | 'transcribing' | 'thinking' | 'speaking' | 'error';
+type SessionPhase = 'ready' | 'recording' | 'transcribing' | 'thinking' | 'synthesizing' | 'downloading' | 'speaking' | 'error';
 
 function SessionScreen({ data, session, onEnd, onCrisis }: { data: AppData; session: SessionEntry; onEnd: (messages: ChatMessage[]) => void; onCrisis: (messages: ChatMessage[]) => void }) {
-  const profile = data.companion!; const [messages, setMessages] = useState<ChatMessage[]>(() => session.intention ? [{ id: uid('message'), role: 'user', content: `What would help in this session: ${session.intention}`, modality: 'text', createdAt: now() }] : []); const [typed, setTyped] = useState(''); const [phase, setPhase] = useState<SessionPhase>('ready'); const [error, setError] = useState(''); const [seconds, setSeconds] = useState(0);
+  const profile = data.companion!; const [messages, setMessages] = useState<ChatMessage[]>(() => session.intention ? [{ id: uid('message'), role: 'user', content: `What would help in this session: ${session.intention}`, modality: 'text', createdAt: now() }] : []); const [typed, setTyped] = useState(''); const [phase, setPhase] = useState<SessionPhase>('ready'); const [progressStage, setProgressStage] = useState<VoiceGenerationStage>(); const [progressStartedAt, setProgressStartedAt] = useState<number>(); const [progressDetail, setProgressDetail] = useState(''); const [error, setError] = useState(''); const [seconds, setSeconds] = useState(0);
   const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY); const rec = useAudioRecorderState(recorder); const player = useAudioPlayer(null); const playerStatus = useAudioPlayerStatus(player);
   const scrollRef = useRef<ScrollView>(null);
-  const requestRef = useRef<AbortController | undefined>(undefined); const recordingActiveRef = useRef(false); const endingRef = useRef(false); const aliveRef = useRef(true);
+  const requestRef = useRef<AbortController | undefined>(undefined); const voiceGenerationIdRef = useRef<string | undefined>(undefined); const recordingActiveRef = useRef(false); const endingRef = useRef(false); const aliveRef = useRef(true);
   useEffect(() => { const timer = setInterval(() => setSeconds((value) => value + 1), 1000); return () => clearInterval(timer); }, []);
-  useEffect(() => { if (phase === 'speaking' && !playerStatus.playing && playerStatus.currentTime > 0) setPhase('ready'); }, [phase, playerStatus.playing, playerStatus.currentTime]);
+  useEffect(() => { if (phase === 'speaking' && !playerStatus.playing && playerStatus.currentTime > 0) { setPhase('ready'); setProgressStage(undefined); setProgressStartedAt(undefined); setProgressDetail(''); } }, [phase, playerStatus.playing, playerStatus.currentTime]);
   useEffect(() => { const timer = setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 80); return () => clearTimeout(timer); }, [messages]);
   useEffect(() => () => {
     aliveRef.current = false;
@@ -1034,31 +1111,83 @@ function SessionScreen({ data, session, onEnd, onCrisis }: { data: AppData; sess
   const append = (message: ChatMessage) => { setMessages((current) => [...current, message]); return message; };
 
   const processTurn = async (content: string, modality: 'text' | 'voice') => {
-    const clean = content.trim(); if (!clean || endingRef.current || phase === 'thinking' || phase === 'speaking' || phase === 'recording') return;
+    // Do not gate this on the render-time `recording` phase. After recorder.stop()
+    // the transcription promise completes inside the previous render's closure,
+    // so `phase` can still be "recording" even though the recorder is stopped.
+    const clean = content.trim(); if (!clean || endingRef.current || phase === 'thinking' || phase === 'synthesizing' || phase === 'downloading' || phase === 'speaking') return;
     setError('');
     const userMessage: ChatMessage = { id: uid('message'), role: 'user', content: clean, modality, createdAt: now() };
     const context = [...messages, userMessage]; append(userMessage); setTyped('');
     if (DISTRESS_PATTERN.test(clean)) { onCrisis(context); return; }
     const controller = new AbortController(); requestRef.current = controller;
+    const startedAt = Date.now();
+    setProgressStartedAt(startedAt);
+    setProgressStage('thinking');
+    setProgressDetail('Writing a short, thoughtful reply.');
     setPhase('thinking');
     try {
-      const turn = await api.chat({ companion_id: profile.id, session_id: session.id, message: clean, modality }, { signal: controller.signal });
+      const turn = await api.localChat({
+        companion: companionContext(profile),
+        history: messages.map((message) => ({ role: message.role, content: message.content })),
+        message: clean,
+      }, { signal: controller.signal });
       if (controller.signal.aborted || !aliveRef.current || endingRef.current) return;
-      const persistedUser = localMessage(turn.user_message);
-      const assistant = localMessage(turn.assistant_message);
-      setMessages((current) => [...current.filter((message) => message.id !== userMessage.id), persistedUser, assistant]);
+      const assistant: ChatMessage = { id: uid('message'), role: 'assistant', content: turn.reply, modality: 'text', createdAt: now() };
+      setMessages((current) => [...current, assistant]);
       if (profile.voiceboxProfileId) {
-        setPhase('speaking');
+        setPhase('synthesizing');
+        setProgressStage('preparing_voice');
+        setProgressDetail('Preparing the familiar AI voice. The first response after startup can take longer.');
         try {
-          const audio = await gatewayVoice(profile.voiceboxProfileId, assistant.content, controller.signal);
+          const audio = await gatewayVoice(profile.voiceboxProfileId, assistant.content, {
+            signal: controller.signal,
+            persistent: data.settings.allowTranscripts,
+            onProgress: (progress) => {
+              voiceGenerationIdRef.current = progress.generationId;
+              if (progress.stage === 'downloading') {
+                setPhase('downloading');
+                setProgressStage('downloading');
+                setProgressDetail('The finished voice is being saved locally on this phone.');
+              } else {
+                setPhase('synthesizing');
+                setProgressStage('preparing_voice');
+                const status = progress.status.replace(/_/g, ' ');
+                setProgressDetail(status === 'loading model' ? 'The voice is warming up for this first response.' : status === 'processing' ? 'The voice is taking shape.' : 'Preparing the voice…');
+              }
+            },
+          });
           if (controller.signal.aborted || !aliveRef.current || endingRef.current) return;
           setMessages((current) => current.map((message) => message.id === assistant.id ? { ...message, audioUri: audio.audioUrl, voiceboxGenerationId: audio.id } : message));
-          void api.updateMessage(session.id, assistant.id, { modality: 'voice', audio_uri: `/api/voicebox/audio/${encodeURIComponent(audio.id)}`, voicebox_generation_id: audio.id }).catch(() => undefined);
-          player.replace(audio.audioUrl); player.play();
-        } catch (voiceError) { if (!controller.signal.aborted && aliveRef.current && !endingRef.current) { setError(`The AI replied, but Voicebox could not speak it: ${displayError(voiceError)}`); setPhase('ready'); } }
-      } else setPhase('ready');
-    } catch (e) { if (!controller.signal.aborted && aliveRef.current && !endingRef.current) { setError(displayError(e)); setPhase('error'); } }
-    finally { if (requestRef.current === controller) requestRef.current = undefined; }
+          voiceGenerationIdRef.current = undefined;
+          setProgressStage('playing');
+          setProgressDetail('The generated reply is now playing from this phone.');
+          setPhase('speaking');
+          player.replace(audio.audioUrl);
+          player.play();
+        } catch (voiceError) {
+          if (!controller.signal.aborted && aliveRef.current && !endingRef.current) {
+            setError(`The written reply is ready, but its voice could not be prepared: ${displayError(voiceError)}`);
+            setProgressStage('error');
+            setProgressDetail(displayError(voiceError));
+            setPhase('error');
+          }
+        }
+      } else {
+        setProgressStage(undefined);
+        setProgressStartedAt(undefined);
+        setPhase('ready');
+      }
+    } catch (e) {
+      if (!controller.signal.aborted && aliveRef.current && !endingRef.current) {
+        setError(displayError(e));
+        setProgressStage('error');
+        setProgressDetail(displayError(e));
+        setPhase('error');
+      }
+    } finally {
+      voiceGenerationIdRef.current = undefined;
+      if (requestRef.current === controller) requestRef.current = undefined;
+    }
   };
 
   const toggleRecord = async () => {
@@ -1067,7 +1196,10 @@ function SessionScreen({ data, session, onEnd, onCrisis }: { data: AppData; sess
       if (!recorder.uri) { setError('The recording could not be read.'); setPhase('error'); return; }
       const controller = new AbortController(); requestRef.current = controller;
       setPhase('transcribing');
-      try { const file = await makeAudioFile(recorder.uri, `turn-${Date.now()}.${Platform.OS === 'web' ? 'webm' : 'm4a'}`, Platform.OS === 'web' ? 'audio/webm' : 'audio/mp4'); const transcript = await api.transcribe(file, {}, { signal: controller.signal }); if (!controller.signal.aborted && aliveRef.current && !endingRef.current) { requestRef.current = undefined; await processTurn(transcript, 'voice'); } }
+      setProgressStartedAt(Date.now());
+      setProgressStage('transcribing');
+      setProgressDetail('Preparing your recording for private transcription.');
+      try { const file = await makeAudioFile(recorder.uri, `turn-${Date.now()}.${Platform.OS === 'web' ? 'webm' : 'm4a'}`, Platform.OS === 'web' ? 'audio/webm' : 'audio/mp4'); const transcript = await api.transcribe(file, {}, { signal: controller.signal, onUploadProgress: (progress) => setProgressDetail(fileTransferLabel(progress, 'Listening carefully to your words…')) }); if (!controller.signal.aborted && aliveRef.current && !endingRef.current) { requestRef.current = undefined; await processTurn(transcript, 'voice'); } }
       catch (e) { if (!controller.signal.aborted && aliveRef.current && !endingRef.current) { setError(displayError(e)); setPhase('error'); } }
       finally { if (requestRef.current === controller) requestRef.current = undefined; }
       return;
@@ -1079,28 +1211,45 @@ function SessionScreen({ data, session, onEnd, onCrisis }: { data: AppData; sess
 
   useEffect(() => { if (rec.isRecording && rec.durationMillis >= 60_000) void toggleRecord(); }, [rec.durationMillis, rec.isRecording]);
 
+  const cancelResponse = () => {
+    const generationId = voiceGenerationIdRef.current;
+    if (generationId) void api.cancelVoiceGeneration(generationId).catch(() => undefined);
+    voiceGenerationIdRef.current = undefined;
+    requestRef.current?.abort();
+    requestRef.current = undefined;
+    setProgressStage(undefined);
+    setProgressStartedAt(undefined);
+    setProgressDetail('');
+    setPhase('ready');
+    setError('Response cancelled. You can continue whenever you are ready.');
+  };
+
   const endSession = async () => {
     if (endingRef.current) return;
-    endingRef.current = true; requestRef.current?.abort();
+    endingRef.current = true;
+    const generationId = voiceGenerationIdRef.current;
+    if (generationId) void api.cancelVoiceGeneration(generationId).catch(() => undefined);
+    requestRef.current?.abort();
     if (recordingActiveRef.current) { try { await recorder.stop(); } catch { /* recorder may already be closing */ } recordingActiveRef.current = false; }
     await setAudioModeAsync({ allowsRecording: false, playsInSilentMode: true }).catch(() => undefined);
     player.pause(); onEnd(messages);
   };
 
-  const phaseText: Record<SessionPhase, string> = { ready: 'Ready when you are', recording: 'Listening · tap to stop', transcribing: 'Transcribing through Saanjh', thinking: 'AI is thinking', speaking: 'AI voice is speaking', error: 'Paused after an error' };
-  const active = phase === 'recording' || phase === 'transcribing' || phase === 'thinking' || phase === 'speaking';
+  const phaseText: Record<SessionPhase, string> = { ready: 'Ready when you are', recording: 'Listening · tap to stop', transcribing: 'Listening to your words', thinking: 'Preparing a reply', synthesizing: 'Preparing the familiar voice', downloading: 'Saving the voice on this phone', speaking: 'AI voice is speaking', error: 'Paused after an error' };
+  const active = phase === 'recording' || phase === 'transcribing' || phase === 'thinking' || phase === 'synthesizing' || phase === 'downloading' || phase === 'speaking';
   return <ImageBackground source={sessionArt} style={s.session} resizeMode="cover"><StatusBar style="light" /><LinearGradient colors={['rgba(8,28,25,.20)', 'rgba(8,28,25,.48)', 'rgba(5,20,19,.88)']} style={StyleSheet.absoluteFill} /><KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}><SafeAreaView style={s.sessionSafe}>
     <View style={s.sessionAura}><AmbientRings size={238} active={!data.settings.reducedMotion} dark /></View>
     <View style={s.sessionTop}><AIChip inverse label={profile.voiceStatus === 'memorial' ? 'AI memorial session' : 'AI voice session'} /><Text style={s.sessionTimer}>{timeLabel(seconds)}</Text></View>
     <Reveal disabled={data.settings.reducedMotion} delay={100}><View style={s.sessionIdentity}><ArtworkAvatar uri={profile.avatarUri} size={82} /><Text style={s.sessionName} numberOfLines={1} ellipsizeMode="tail">{profile.name}</Text><Text style={s.sessionDisclosure}>AI-generated · not the real person</Text></View></Reveal>
     <Wave active={active} reducedMotion={data.settings.reducedMotion} />
     <Text accessibilityLiveRegion="polite" style={s.phaseText}>{phaseText[phase]}{phase === 'recording' ? ` · ${Math.round(rec.durationMillis / 1000)}s` : ''}</Text>
+    {progressStage && progressStartedAt ? <VoiceGenerationStatus stage={progressStage} startedAt={progressStartedAt} detail={progressDetail} onCancel={progressStage === 'thinking' || progressStage === 'preparing_voice' || progressStage === 'downloading' ? cancelResponse : undefined} reducedMotion={data.settings.reducedMotion} style={s.sessionProgress} /> : null}
     <ScrollView ref={scrollRef} style={s.captionBox} contentContainerStyle={s.captionContent}>
       {messages.length === 0 ? <Text style={s.captionEmpty}>Captions will appear here during this session. They are {data.settings.allowTranscripts ? 'saved because you enabled transcript history.' : 'discarded when you leave.'}</Text> : messages.map((message) => <View key={message.id} style={[s.message, message.role === 'user' ? s.messageUser : s.messageAI]}><Text style={s.messageRole}>{message.role === 'user' ? 'YOU' : 'AI'}</Text><Text style={s.messageText}>{message.content}</Text>{message.audioUri ? <Pressable accessibilityRole="button" accessibilityLabel="Play this AI voice reply" onPress={() => { player.replace(message.audioUri!); player.play(); setPhase('speaking'); }} style={s.replay}><Volume2 size={15} color={C.peach300} /><Text style={s.replayText}>Play voice</Text></Pressable> : null}</View>)}
     </ScrollView>
     {error ? <View style={s.sessionError}><CircleAlert size={17} color={C.peach300} /><Text style={s.sessionErrorText}>{error}</Text></View> : null}
     <View style={s.composer}><TextInput value={typed} onChangeText={setTyped} placeholder="Type instead…" placeholderTextColor="rgba(252,248,246,.58)" style={s.composerInput} editable={!active} /><Pressable accessibilityRole="button" accessibilityLabel="Send message" onPress={() => { void processTurn(typed, 'text'); }} style={[s.sendButton, (!typed.trim() || active) && { opacity: .4 }]} disabled={!typed.trim() || active}><Send size={19} color={C.inverse} /></Pressable></View>
-    <View style={s.sessionControls}><Pressable accessibilityRole="button" accessibilityLabel={rec.isRecording ? 'Stop recording' : 'Start recording'} accessibilityState={{ disabled: phase === 'thinking' || phase === 'transcribing' || phase === 'speaking' }} onPress={toggleRecord} disabled={phase === 'thinking' || phase === 'transcribing' || phase === 'speaking'} style={[s.micControl, rec.isRecording && s.micControlActive]}>{rec.isRecording ? <Square size={25} color={C.night950} fill={C.night950} /> : <Mic size={27} color={C.night950} />}</Pressable><Pressable accessibilityRole="button" accessibilityLabel="End session" onPress={() => { void endSession(); }} style={s.endControl}><PhoneOff size={26} color={C.inverse} /><Text style={s.endLabel}>End</Text></Pressable></View>
+    <View style={s.sessionControls}><Pressable accessibilityRole="button" accessibilityLabel={rec.isRecording ? 'Stop recording' : 'Start recording'} accessibilityState={{ disabled: active && phase !== 'recording' }} onPress={toggleRecord} disabled={active && phase !== 'recording'} style={[s.micControl, rec.isRecording && s.micControlActive]}>{rec.isRecording ? <Square size={25} color={C.night950} fill={C.night950} /> : <Mic size={27} color={C.night950} />}</Pressable><Pressable accessibilityRole="button" accessibilityLabel="End session" onPress={() => { void endSession(); }} style={s.endControl}><PhoneOff size={26} color={C.inverse} /><Text style={s.endLabel}>End</Text></Pressable></View>
   </SafeAreaView></KeyboardAvoidingView></ImageBackground>;
 }
 
@@ -1131,7 +1280,7 @@ function SafetyScreen({ onBack }: { onBack: () => void }) {
 
 function AppContent() {
   const [fontsLoaded, fontError] = useFonts({ PlayfairDisplay_500Medium, PlayfairDisplay_600SemiBold, Inter_400Regular, Inter_500Medium, Inter_600SemiBold, Inter_700Bold });
-  const [loaded, setLoaded] = useState(false); const [data, setData] = useState<AppData>(createEmptyAppData()); const [route, setRoute] = useState<Route>('welcome'); const [activeSessionId, setActiveSessionId] = useState<string>(); const [afterSessionId, setAfterSessionId] = useState<string>();
+  const [loaded, setLoaded] = useState(false); const [data, setData] = useState<AppData>(createEmptyAppData()); const [apiAccessToken, setApiAccessToken] = useState(''); const [route, setRoute] = useState<Route>('welcome'); const [activeSessionId, setActiveSessionId] = useState<string>(); const [afterSessionId, setAfterSessionId] = useState<string>();
 
   useEffect(() => {
     let alive = true;
@@ -1139,11 +1288,15 @@ function AppContent() {
       let cached: AppData;
       try { cached = await loadAppData(); } catch { cached = createEmptyAppData(); }
       cached = { ...cached, settings: sanitizedSettings(cached.settings) };
-      try {
-        const remote = await api.getCurrentCompanion();
-        cached = { ...cached, hasSeenWelcome: remote ? true : cached.hasSeenWelcome, companion: remote ? localCompanion(remote, cached.companion) : undefined };
-      } catch { /* Offline startup uses the last UI cache; AI and voice still require the backend. */ }
+      const accessToken = await loadApiAccessToken().catch(() => '');
+      const savedBaseUrl = cached.settings.apiBaseUrl.trim();
+      const baseUrl = (!savedBaseUrl || isTemporaryBackendUrl(savedBaseUrl)) && SAANJH_API_BASE_URL
+        ? SAANJH_API_BASE_URL
+        : savedBaseUrl;
+      cached = { ...cached, settings: { ...cached.settings, apiBaseUrl: baseUrl } };
+      configureSaanjhApi({ baseUrl, accessToken });
       if (!alive) return;
+      setApiAccessToken(accessToken);
       setData(cached);
       setRoute(cached.companion ? 'today' : !cached.hasSeenWelcome ? 'welcome' : 'onboarding');
       void saveAppData(cached).catch(() => undefined);
@@ -1153,6 +1306,13 @@ function AppContent() {
     return () => { alive = false; };
   }, []);
   const commit = useCallback((update: (current: AppData) => AppData) => { setData((current) => { const next = update(current); void saveAppData(next).catch(() => notify('Local save failed', 'Saanjh could not save this change on the device.')); return next; }); }, []);
+  const saveConnection = useCallback(async (baseUrl: string, accessToken: string) => {
+    const cleanUrl = baseUrl.trim();
+    configureSaanjhApi({ baseUrl: cleanUrl, accessToken });
+    await saveApiAccessToken(accessToken);
+    setApiAccessToken(accessToken.trim());
+    commit((current) => ({ ...current, settings: { ...current.settings, apiBaseUrl: cleanUrl } }));
+  }, [commit]);
   const go = (next: Route) => { setRoute(next); void haptic(); };
   const tab = (next: TabRoute) => go(next);
 
@@ -1162,32 +1322,62 @@ function AppContent() {
   const markRemoteProfileOrphaned = (profileId: string) => commit((current) => ({ ...current, pendingVoiceboxProfileIds: current.pendingVoiceboxProfileIds.includes(profileId) ? current.pendingVoiceboxProfileIds : [...current.pendingVoiceboxProfileIds, profileId] }));
   const startSession = async (kind: SessionKind, intention?: string, moodScore?: 1 | 2 | 3 | 4 | 5) => {
     if (!data.companion) return;
-    if (!SAANJH_API_BASE_URL) { notify('Backend setup needed', 'This Android build needs EXPO_PUBLIC_API_URL set to the public Saanjh backend.'); go('settings'); return; }
+    if (!data.settings.apiBaseUrl) { notify('Saanjh is unavailable', 'The app service is not configured in this build. Please install the latest Saanjh update.'); return; }
     if (kind === 'voice' && !data.companion.voiceboxProfileId) { notify('Voice setup needed', 'Sync the companion voice before starting a voice session.'); go('companion'); return; }
-    try {
-      const remote = await api.createSession({ companion_id: data.companion.id, kind, intention: intention?.trim() || null });
-      const mood: MoodEntry | undefined = moodScore ? { id: uid('mood'), mood: MOODS.find((item) => item.score === moodScore)?.label ?? String(moodScore), score: moodScore, context: 'before-session', createdAt: now(), sessionId: remote.id } : undefined;
-      const session: SessionEntry = { id: remote.id, companionId: remote.companion_id, kind: remote.kind, status: remote.status, startedAt: remote.started_at, messages: [], intention: remote.intention ?? undefined, moodBeforeId: mood?.id };
-      commit((current) => ({ ...current, moods: mood ? [mood, ...current.moods] : current.moods, sessions: [session, ...current.sessions] })); setActiveSessionId(session.id); go('session');
-    } catch (e) { notify('Could not start the session', displayError(e)); }
+    if (kind === 'voice' && data.companion.voiceboxProfileId) {
+      try {
+        const profiles = await api.listVoiceboxProfiles();
+        const linked = profiles.some((item) => String(item.id ?? item.profile_id ?? '') === data.companion?.voiceboxProfileId);
+        if (!linked) {
+          updateProfile({ ...data.companion, voiceboxProfileId: undefined });
+          notify('Voice needs refreshing', 'Your saved voice needs to be prepared again. The original sample is still safely on this phone.');
+          go('companion');
+          return;
+        }
+      } catch (error) {
+        notify('Voice is temporarily unavailable', displayError(error));
+        return;
+      }
+    }
+    const sessionId = uid('session');
+    const mood: MoodEntry | undefined = moodScore ? { id: uid('mood'), mood: MOODS.find((item) => item.score === moodScore)?.label ?? String(moodScore), score: moodScore, context: 'before-session', createdAt: now(), sessionId } : undefined;
+    const session: SessionEntry = { id: sessionId, companionId: data.companion.id, kind, status: 'active', startedAt: now(), messages: [], intention: intention?.trim() || undefined, moodBeforeId: mood?.id };
+    commit((current) => ({ ...current, moods: mood ? [mood, ...current.moods] : current.moods, sessions: [session, ...current.sessions] })); setActiveSessionId(session.id); go('session');
   };
   const finishSession = async (messages: ChatMessage[], status: 'completed' | 'cancelled' = 'completed') => {
     if (!activeSessionId) { go('today'); return; }
     const id = activeSessionId; const endedAt = now();
-    try { await api.updateSession(id, { status, ended_at: endedAt }); }
-    catch (e) { notify('Session saved locally', `The backend could not close this session yet: ${displayError(e)}`); }
     commit((current) => ({ ...current, sessions: current.sessions.map((session) => session.id === id ? { ...session, status, endedAt, messages: current.settings.allowTranscripts ? messages : [] } : session) })); setAfterSessionId(id); setActiveSessionId(undefined); go(status === 'completed' ? 'aftercare' : 'safety');
+    if (!data.settings.allowTranscripts) clearGeneratedAudioCache();
   };
   const saveAftercare = (score?: 1 | 2 | 3 | 4 | 5, note?: string) => {
     commit((current) => { const sessionKind = current.sessions.find((item) => item.id === afterSessionId)?.kind ?? 'voice'; const moods = score ? [{ id: uid('mood'), mood: MOODS.find((item) => item.score === score)?.label ?? String(score), score, context: 'after-session' as const, sessionId: afterSessionId, createdAt: now() }, ...current.moods] : current.moods; const timestamp = now(); const journal = note ? [{ id: uid('journal'), title: `After a ${sessionKind} session`, body: note, sessionId: afterSessionId, createdAt: timestamp, updatedAt: timestamp }, ...current.journal] : current.journal; return { ...current, moods, journal }; }); setAfterSessionId(undefined); go('today');
   };
-  const retryRemoteCleanup = async () => { const remaining: string[] = []; for (const profileId of data.pendingVoiceboxProfileIds) { try { await api.deleteVoiceboxProfile(profileId); } catch { remaining.push(profileId); } } commit((current) => ({ ...current, pendingVoiceboxProfileIds: remaining })); return remaining.length ? `${remaining.length} remote profile${remaining.length === 1 ? '' : 's'} still could not be deleted. Check the backend and retry.` : 'Remote Voicebox cleanup is complete.'; };
-  const deleteCompanion = async () => { const confirmed = await confirmAction('Delete companion and voice?', 'The Saanjh backend will delete the linked Voicebox profile first, then remove the companion. Local session cache will also be cleared.', 'Delete'); if (!confirmed) return; const profile = data.companion; if (!profile) return; try { await api.deleteCompanion(profile.id); } catch (e) { notify('Companion deletion failed', `${displayError(e)}\n\nThe local companion was kept so remote voice data is never orphaned.`); return; } deletePersistedMedia(profile.voiceSampleUri); deletePersistedMedia(profile.avatarUri); commit((current) => ({ ...current, companion: undefined, sessions: [] })); go('onboarding'); };
-  const resetAll = async () => { if (data.companion?.voiceboxProfileId || data.pendingVoiceboxProfileIds.length) { notify('Remote voice data still exists', 'Delete the companion and finish any pending Voicebox cleanup before resetting local data. This preserves the IDs needed for safe deletion.'); return; } const confirmed = await confirmAction('Reset all local data?', 'This removes settings, moods, journal entries, and session history from this device and cannot be undone.', 'Reset'); if (!confirmed) return; deletePersistedMedia(data.companion?.voiceSampleUri); deletePersistedMedia(data.companion?.avatarUri); await clearAppData(); const empty = createEmptyAppData(); setData(empty); setRoute('welcome'); };
+  const retryRemoteCleanup = async () => { const remaining: string[] = []; for (const profileId of data.pendingVoiceboxProfileIds) { try { await api.deleteVoiceboxProfile(profileId); } catch { remaining.push(profileId); } } commit((current) => ({ ...current, pendingVoiceboxProfileIds: remaining })); return remaining.length ? 'Secure cleanup could not finish yet. Please try again when your connection is stronger.' : 'Secure voice cleanup is complete.'; };
+  const deleteCompanion = async () => { const confirmed = await confirmAction('Delete companion and voice?', 'This securely removes the created AI voice first, then clears the companion and sessions from this phone.', 'Delete'); if (!confirmed) return; const profile = data.companion; if (!profile) return; if (profile.voiceboxProfileId) { try { await api.deleteVoiceboxProfile(profile.voiceboxProfileId); } catch (e) { notify('Companion deletion paused', `${displayError(e)}\n\nYour local companion was kept so no voice data is left behind.`); return; } } clearAllPersistedMedia(); commit((current) => ({ ...current, companion: undefined, sessions: [] })); go('onboarding'); };
+  const resetAll = async () => {
+    const confirmed = await confirmAction('Reset all local data?', 'This removes settings, moods, journal entries, and session history from this device and cannot be undone.', 'Reset');
+    if (!confirmed) return;
+    if (data.companion?.voiceboxProfileId) {
+      try { await api.deleteVoiceboxProfile(data.companion.voiceboxProfileId); }
+      catch (error) {
+        notify('Remote voice cleanup failed', `${displayError(error)}\n\nLocal data was kept so you can retry without orphaning the cloned voice.`);
+        return;
+      }
+    }
+    clearAllPersistedMedia();
+    await clearAppData();
+    await clearApiAccessToken();
+    configureSaanjhApi({ baseUrl: '', accessToken: '' });
+    setApiAccessToken('');
+    const empty = createEmptyAppData();
+    setData(empty);
+    setRoute('welcome');
+  };
 
   if (!loaded || (!fontsLoaded && !fontError)) return <LoadingScreen />;
   if (route === 'welcome') return <WelcomeScreen onBegin={beginWelcome} />;
-  if (route === 'onboarding' || !data.companion) return <OnboardingScreen initialSettings={data.settings} onComplete={completeOnboarding} onRemoteProfileOrphaned={markRemoteProfileOrphaned} />;
+  if (route === 'onboarding' || !data.companion) return <OnboardingScreen initialSettings={data.settings} initialAccessToken={apiAccessToken} onSaveConnection={saveConnection} onComplete={completeOnboarding} onRemoteProfileOrphaned={markRemoteProfileOrphaned} />;
   if (route === 'mood') return <MoodScreen reducedMotion={data.settings.reducedMotion} onBack={() => go('today')} onSave={(entry) => { if (entry) commit((current) => ({ ...current, moods: [entry, ...current.moods] })); go('today'); }} />;
   if (route === 'precall') return <PreCallScreen data={data} onBack={() => go('today')} onStart={(intention, moodScore) => startSession('voice', intention, moodScore)} />;
   if (route === 'session') { const session = data.sessions.find((item) => item.id === activeSessionId); return session ? <SessionScreen data={data} session={session} onEnd={(messages) => finishSession(messages)} onCrisis={(messages) => finishSession(messages, 'cancelled')} /> : <LoadingScreen />; }
@@ -1198,8 +1388,9 @@ function AppContent() {
   return <Shell active={active} onNavigate={tab} reducedMotion={data.settings.reducedMotion}>
     {route === 'today' ? <TodayScreen data={data} go={go} start={startSession} /> : null}
     {route === 'companion' ? <CompanionScreen data={data} updateProfile={updateProfile} go={go} onRemoteProfileOrphaned={markRemoteProfileOrphaned} /> : null}
+    {route === 'rituals' ? <RitualsScreen reducedMotion={data.settings.reducedMotion} /> : null}
     {route === 'journal' ? <JournalScreen entries={data.journal} onAdd={(entry) => commit((current) => ({ ...current, journal: [entry, ...current.journal] }))} onDelete={(id) => commit((current) => ({ ...current, journal: current.journal.filter((entry) => entry.id !== id) }))} /> : null}
-    {route === 'settings' ? <SettingsScreen data={data} onSave={(settings) => commit((current) => ({ ...current, settings }))} onSafety={() => go('safety')} onDeleteCompanion={() => { void deleteCompanion(); }} onReset={() => { void resetAll(); }} onRetryRemoteCleanup={retryRemoteCleanup} /> : null}
+    {route === 'settings' ? <SettingsScreen data={data} initialAccessToken={apiAccessToken} onSave={async (settings, accessToken) => { await saveConnection(settings.apiBaseUrl, accessToken); commit((current) => ({ ...current, settings })); }} onSafety={() => go('safety')} onDeleteCompanion={() => { void deleteCompanion(); }} onReset={() => { void resetAll(); }} onRetryRemoteCleanup={retryRemoteCleanup} /> : null}
   </Shell>;
 }
 
@@ -1258,7 +1449,7 @@ const s = StyleSheet.create({
   field: { minHeight: 57, borderRadius: radii.md, borderWidth: 1, borderColor: C.line, paddingHorizontal: 16, backgroundColor: 'rgba(247,241,231,.78)', fontFamily: font.medium, fontSize: 14, color: C.text },
   fieldMultiline: { minHeight: 108, textAlignVertical: 'top', paddingTop: 15, paddingBottom: 15, lineHeight: 21 },
 
-  choiceCard: { minHeight: 94, flexDirection: 'row', alignItems: 'center', gap: 13, padding: 15, borderRadius: radii.lg, borderWidth: 1, borderColor: C.line, backgroundColor: 'rgba(247,241,231,.75)', ...softShadow },
+  choiceCard: { minHeight: 94, flexDirection: 'row', alignItems: 'center', gap: 13, padding: 15, borderRadius: radii.lg, borderWidth: 1, borderColor: C.line, backgroundColor: C.ivory, ...softShadow },
   choiceCardSelected: { borderColor: C.plum500, backgroundColor: 'rgba(226,229,217,.93)' },
   choiceIcon: { width: 46, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center', backgroundColor: C.paper, borderWidth: 1, borderColor: C.line },
   choiceIconSelected: { backgroundColor: C.ivory },
@@ -1298,14 +1489,15 @@ const s = StyleSheet.create({
   avatarPicker: { alignSelf: 'center', position: 'relative', marginTop: 8 },
   avatarAdd: { position: 'absolute', right: -2, bottom: 3, width: 38, height: 38, borderRadius: 19, backgroundColor: C.plum700, borderWidth: 3, borderColor: C.ivory, alignItems: 'center', justifyContent: 'center' },
   consentArt: { width: '100%', height: 198, borderRadius: radii.lg, borderWidth: 1, borderColor: C.line },
+  readyArt: { width: '100%', height: 220, borderRadius: radii.lg, borderWidth: 1, borderColor: C.line },
   consentCheck: { flexDirection: 'row', gap: 12, alignItems: 'flex-start', borderWidth: 1, borderColor: C.line, backgroundColor: 'rgba(247,241,231,.64)', borderRadius: radii.md, padding: 16, marginTop: 4 },
   consentCheckActive: { backgroundColor: C.lavender100, borderColor: C.sage },
   checkbox: { width: 25, height: 25, borderRadius: 8, borderWidth: 1.5, borderColor: C.sage, alignItems: 'center', justifyContent: 'center' },
   checkboxActive: { backgroundColor: C.plum700, borderColor: C.plum700 },
   consentCheckText: { flex: 1, fontFamily: font.medium, fontSize: 12, lineHeight: 18, color: C.text },
 
-  sampleGrid: { flexDirection: 'row', gap: 12 },
-  sampleAction: { flex: 1, minHeight: 130, borderWidth: 1, borderColor: C.line, backgroundColor: 'rgba(247,241,231,.78)', borderRadius: radii.lg, alignItems: 'center', justifyContent: 'center', gap: 10, ...softShadow },
+  sampleGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
+  sampleAction: { flex: 1, minHeight: 130, borderWidth: 1, borderColor: C.line, backgroundColor: C.ivory, borderRadius: radii.lg, alignItems: 'center', justifyContent: 'center', gap: 10, ...softShadow },
   sampleActionRecording: { backgroundColor: C.plum700, borderColor: C.gold },
   sampleActionTitle: { fontFamily: font.semibold, fontSize: 12, color: C.text },
   sampleReady: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 13, backgroundColor: C.lavender100, borderWidth: 1, borderColor: C.line, borderRadius: radii.md },
@@ -1339,11 +1531,6 @@ const s = StyleSheet.create({
   compactCallText: { fontFamily: font.semibold, color: C.inverse, fontSize: 11 },
   sectionTitle: { fontFamily: font.display, color: C.text, fontSize: 28, lineHeight: 31, marginTop: 27, marginBottom: 12 },
   actionGrid: { flexDirection: 'row', gap: 12 },
-  actionCard: { flex: 1, minHeight: 150, padding: 15, borderRadius: radii.lg, borderWidth: 1, borderColor: C.line, backgroundColor: 'rgba(247,241,231,.78)', position: 'relative', ...softShadow },
-  actionIcon: { width: 43, height: 43, borderRadius: 22, backgroundColor: C.lavender100, borderWidth: 1, borderColor: 'rgba(47,74,59,.08)', alignItems: 'center', justifyContent: 'center' },
-  actionTitle: { fontFamily: font.displayMedium, fontSize: 17, color: C.text, marginTop: 14 },
-  actionBody: { fontFamily: font.body, fontSize: 11, lineHeight: 16, color: C.textSecondary, marginTop: 3, paddingRight: 12 },
-  actionChevron: { position: 'absolute', bottom: 14, right: 12 },
   journalBanner: { flexDirection: 'row', alignItems: 'center', gap: 12, borderRadius: radii.lg, borderWidth: 1, borderColor: C.line, padding: 16, marginTop: 13, backgroundColor: 'rgba(226,229,217,.72)' },
   journalBannerTitle: { fontFamily: font.semibold, fontSize: 12, color: C.text },
   journalBannerBody: { fontFamily: font.body, fontSize: 11, lineHeight: 16, color: C.textSecondary, marginTop: 3 },
@@ -1366,7 +1553,7 @@ const s = StyleSheet.create({
   emptyTitle: { fontFamily: font.display, fontSize: 30, color: C.text, marginTop: 18 },
   emptyBody: { fontFamily: font.body, fontSize: 12, lineHeight: 19, color: C.textSecondary, textAlign: 'center', maxWidth: 340, marginTop: 7 },
   entryList: { gap: 12 },
-  entryCard: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, borderWidth: 1, borderColor: C.line, backgroundColor: 'rgba(247,241,231,.78)', borderRadius: radii.lg, padding: 17, ...softShadow },
+  entryCard: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, borderWidth: 1, borderColor: C.line, backgroundColor: C.ivory, borderRadius: radii.lg, padding: 17, ...softShadow },
   entryDate: { fontFamily: font.bold, fontSize: 9, letterSpacing: .9, color: C.plum500 },
   entryTitle: { fontFamily: font.display, fontSize: 23, color: C.text, marginTop: 4 },
   entryBody: { fontFamily: font.body, fontSize: 12, lineHeight: 19, color: C.textSecondary, marginTop: 6 },
@@ -1378,7 +1565,7 @@ const s = StyleSheet.create({
   profileHero: { alignItems: 'center', marginVertical: 10, paddingVertical: 8 },
   profileStatus: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: C.lavender100, borderWidth: 1, borderColor: C.line, borderRadius: radii.pill, paddingHorizontal: 11, paddingVertical: 6, marginTop: -4 },
   profileStatusText: { fontFamily: font.semibold, color: C.success, fontSize: 10 },
-  voicePanel: { flexDirection: 'row', alignItems: 'center', gap: 10, borderWidth: 1, borderColor: C.line, backgroundColor: 'rgba(247,241,231,.72)', borderRadius: radii.lg, padding: 16, marginTop: 18, ...softShadow },
+  voicePanel: { flexDirection: 'row', alignItems: 'center', gap: 10, borderWidth: 1, borderColor: C.line, backgroundColor: C.ivory, borderRadius: radii.lg, padding: 16, marginTop: 18, ...softShadow },
   voicePanelTitle: { fontFamily: font.displayMedium, fontSize: 17, color: C.text },
   voicePanelBody: { fontFamily: font.body, fontSize: 11, lineHeight: 17, color: C.textSecondary, marginTop: 3 },
   statusDot: { width: 12, height: 12, borderRadius: 6, backgroundColor: C.success, borderWidth: 2, borderColor: C.lavender100 },
@@ -1415,6 +1602,7 @@ const s = StyleSheet.create({
   wave: { height: 52, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, marginTop: 6 },
   waveBar: { width: 3, borderRadius: 3, backgroundColor: C.gold },
   phaseText: { fontFamily: font.semibold, color: C.inverse, fontSize: 11, textAlign: 'center', marginBottom: 9 },
+  sessionProgress: { marginBottom: 10 },
   captionBox: { flex: 1, minHeight: 84, maxHeight: 245, borderRadius: radii.lg, backgroundColor: 'rgba(8,31,29,.58)', borderWidth: 1, borderColor: 'rgba(181,151,93,.25)' },
   captionContent: { padding: 13, gap: 9 },
   captionEmpty: { fontFamily: font.body, fontSize: 11, lineHeight: 17, color: C.inverseSecondary, textAlign: 'center', padding: 14 },
@@ -1436,7 +1624,7 @@ const s = StyleSheet.create({
   endControl: { width: 64, height: 64, borderRadius: 32, backgroundColor: C.clay, borderWidth: 1, borderColor: 'rgba(247,241,231,.22)', alignItems: 'center', justifyContent: 'center' },
   endLabel: { position: 'absolute', bottom: -17, fontFamily: font.semibold, fontSize: 9, color: C.inverseSecondary },
 
-  emergencyCard: { flexDirection: 'row', alignItems: 'center', gap: 13, borderWidth: 1, borderColor: 'rgba(162,79,69,.22)', backgroundColor: 'rgba(247,241,231,.62)', borderRadius: radii.lg, padding: 16, marginTop: 16, ...softShadow },
+  emergencyCard: { flexDirection: 'row', alignItems: 'center', gap: 13, borderWidth: 1, borderColor: 'rgba(162,79,69,.22)', backgroundColor: C.ivory, borderRadius: radii.lg, padding: 16, marginTop: 16, ...softShadow },
   emergencyIcon: { width: 52, height: 52, borderRadius: 26, backgroundColor: C.danger, alignItems: 'center', justifyContent: 'center' },
   emergencyTitle: { fontFamily: font.semibold, fontSize: 15, color: C.danger },
   emergencyBody: { fontFamily: font.body, fontSize: 10, lineHeight: 15, color: C.textSecondary, marginTop: 3 },

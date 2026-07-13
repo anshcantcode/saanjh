@@ -1,4 +1,6 @@
-# Saanjh
+# Historical Expo prototype notes
+
+> **Archive notice:** This document describes an earlier client-only architecture and is kept for design/provenance context. It is not the current setup guide. The active Android app now uses the FastAPI gateway, Groq, Voicebox, local-first storage, and the commands documented in the root [README](../README.md).
 
 Saanjh is an Expo prototype for a **clearly disclosed AI voice companion**. It can create a consent-gated companion profile, turn recorded speech into text, ask Groq for a safety-prompted reply, and render that reply through a locally hosted cloned voice.
 

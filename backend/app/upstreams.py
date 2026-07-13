@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Any, AsyncIterator, Mapping, Sequence
 from urllib.parse import quote, urlparse
 
 import httpx
 
 from .config import get_settings
+
+
+logger = logging.getLogger("saanjh.upstreams")
 
 
 @dataclass
@@ -144,6 +148,7 @@ async def voicebox_multipart(
     filename: str,
     content: bytes,
     content_type: str,
+    file_field: str = "file",
     fields: Mapping[str, str] | None = None,
 ) -> Any:
     settings = get_settings()
@@ -157,9 +162,15 @@ async def voicebox_multipart(
                 _voicebox_url(path),
                 headers={"Accept": "application/json"},
                 data=dict(fields or {}),
-                files={"file": (filename, content, content_type)},
+                files={file_field: (filename, content, content_type)},
             )
     except httpx.TimeoutException as exc:
+        logger.warning(
+            "Voicebox multipart timeout path=%s file_field=%s timeout=%s",
+            path,
+            file_field,
+            settings.voicebox_timeout_seconds,
+        )
         raise UpstreamServiceError(
             service="Voicebox",
             code="timeout",
@@ -167,6 +178,12 @@ async def voicebox_multipart(
             status_code=504,
         ) from exc
     except httpx.RequestError as exc:
+        logger.warning(
+            "Voicebox multipart unreachable path=%s file_field=%s error=%s",
+            path,
+            file_field,
+            exc.__class__.__name__,
+        )
         raise UpstreamServiceError(
             service="Voicebox",
             code="unreachable",
@@ -175,10 +192,17 @@ async def voicebox_multipart(
 
     payload = _json(response, "Voicebox")
     if not response.is_success:
+        message = _message(payload) or f"Voicebox returned HTTP {response.status_code}."
+        logger.warning(
+            "Voicebox multipart failed path=%s status=%s message=%s",
+            path,
+            response.status_code,
+            message,
+        )
         raise UpstreamServiceError(
             service="Voicebox",
             code="upstream_http_error",
-            message=_message(payload) or f"Voicebox returned HTTP {response.status_code}.",
+            message=message,
             status_code=502 if response.status_code < 500 else 503,
             upstream_status=response.status_code,
         )
@@ -356,7 +380,7 @@ async def groq_chat(system_prompt: str, messages: Sequence[Mapping[str, str]]) -
         json_body={
             "model": settings.groq_model,
             "temperature": 0.65,
-            "max_completion_tokens": 220,
+            "max_completion_tokens": 120,
             "messages": [{"role": "system", "content": system_prompt}, *messages],
         },
     )

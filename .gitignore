@@ -1,5 +1,10 @@
 node_modules/
 .venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+coverage/
 *.db
 *.db-shm
 *.db-wal
@@ -11,9 +16,15 @@ dist/
 dist-expo/
 web-build/
 *.log
+.runtime/
+logs/
 .DS_Store
 .env
 .env.*
 !.env.example
 android/
 ios/
+showcase/
+releases/*.apk
+.idea/
+.vscode/

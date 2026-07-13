@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from datetime import datetime
+import logging
 import re
+from secrets import compare_digest, token_hex
 import sqlite3
 from typing import Annotated, Any, TypeVar
 
-from fastapi import FastAPI, File, Form, HTTPException, Path, Query, Response, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Path, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
@@ -25,6 +27,9 @@ from .schemas import (
     HealthOut,
     JournalCreate,
     JournalOut,
+    LocalChatOut,
+    LocalChatRequest,
+    LocalCompanionContext,
     MessageCreate,
     MessageModality,
     MessageOut,
@@ -55,6 +60,7 @@ from .upstreams import (
 
 
 settings = get_settings()
+logger = logging.getLogger("uvicorn.error")
 ModelT = TypeVar("ModelT", bound=BaseModel)
 DISTRESS_PATTERN = re.compile(
     r"\b(kill myself|suicid(?:e|al)|end my life|take my life|want to die|"
@@ -93,6 +99,50 @@ app = FastAPI(
     ),
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def optional_bearer_token(request: Request, call_next: Any) -> Response:
+    """Protect every public API route when SAANJH_API_TOKEN is configured.
+
+    OPTIONS remains unauthenticated so browser CORS preflights can complete.
+    `/livez` is deliberately outside `/api` and reveals no upstream details.
+    """
+    protected_path = request.url.path.startswith(("/api/", "/docs", "/redoc", "/openapi.json"))
+    if settings.api_token and protected_path and request.method != "OPTIONS":
+        authorization = request.headers.get("authorization", "")
+        scheme, separator, credential = authorization.partition(" ")
+        query_credential = request.query_params.get("access_token", "")
+        valid = (
+            bool(separator)
+            and scheme.lower() == "bearer"
+            and bool(credential)
+            and compare_digest(credential, settings.api_token)
+        ) or (bool(query_credential) and compare_digest(query_credential, settings.api_token))
+        if not valid:
+            return JSONResponse(
+                status_code=401,
+                headers={
+                    "WWW-Authenticate": "Bearer",
+                    "Cache-Control": "no-store",
+                },
+                content={
+                    "error": {
+                        "service": "Saanjh API",
+                        "code": "authentication_required",
+                        "message": "A valid Saanjh API bearer token is required.",
+                        "upstream_status": None,
+                    }
+                },
+            )
+    response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        # Do not let a tunnel/CDN or shared browser cache retain health details,
+        # companion content, transcripts, generated text, or voice metadata.
+        response.headers.setdefault("Cache-Control", "no-store")
+    return response
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=list(settings.cors_origins),
@@ -102,8 +152,20 @@ app.add_middleware(
 )
 
 
+@app.get("/livez", include_in_schema=False)
+def liveness() -> dict[str, str]:
+    """Process-only probe for a local supervisor or tunnel origin check."""
+    return {"status": "ok"}
+
+
 @app.exception_handler(UpstreamServiceError)
 async def upstream_error_handler(_, exc: UpstreamServiceError) -> JSONResponse:
+    diagnostic = (
+        f"Saanjh upstream error service={exc.service} code={exc.code} "
+        f"status={exc.status_code} upstream_status={exc.upstream_status} message={exc.message}"
+    )
+    logger.error(diagnostic)
+    print(f"ERROR:    {diagnostic}", flush=True)
     return JSONResponse(
         status_code=exc.status_code,
         content={
@@ -475,9 +537,14 @@ def patch_message(session_id: RecordId, message_id: RecordId, body: MessagePatch
     return MessageOut.model_validate(record)
 
 
-def _system_prompt(companion: CompanionOut) -> str:
+def _system_prompt(companion: CompanionOut | LocalCompanionContext) -> str:
     relationship = companion.custom_relationship if companion.relationship.value == "other" else companion.relationship.value
     traits = ", ".join(companion.traits) if companion.traits else "warm, calm, and concise"
+    user_address_rule = (
+        f"The user asked to be called: {companion.address_as}. Use that naturally, not in every sentence."
+        if companion.address_as
+        else "The user's name is not known. Do not guess it, and avoid using a name unless the user gives one."
+    )
     if companion.memories:
         memory_rule = "Only these user-approved memories may be referenced:\n" + "\n".join(
             f"- {memory}" for memory in companion.memories
@@ -495,15 +562,19 @@ def _system_prompt(companion: CompanionOut) -> str:
             "You are Saanjh, a clearly disclosed AI companion for emotional support and reflection.",
             AI_DISCLOSURE,
             identity_rule,
+            f"The companion/profile name is {companion.name}; this is not automatically the current user's name.",
             f"The user stored the relationship as: {relationship}.",
             f"The user selected this communication style: {traits}.",
-            f"Address the user as: {companion.address_as}." if companion.address_as else "",
+            user_address_rule,
             f"The user says support is helpful when: {companion.helpful_when}." if companion.helpful_when else "",
             f"The user asked to avoid: {companion.avoid}." if companion.avoid else "",
             memory_rule,
+            "Sound human and present: respond like a calm friend in a real conversation, with plain words, small specifics, and emotional warmth.",
+            "Do not sound like a chatbot. Avoid stock phrases, bullet points, disclaimers, and repeated lines like 'I'm here for you' unless they genuinely fit.",
+            "Do not mention that you are AI in every reply; the app already discloses it. Mention it only if identity, consent, or realism comes up.",
             "Never diagnose, impersonate a clinician, encourage dependency, or suggest withdrawing from real people.",
             "For imminent self-harm, abuse, or immediate danger, be direct and compassionate and encourage local emergency help or a trusted nearby person now.",
-            "Keep replies natural, concise, and usually under 70 words. Ask at most one gentle question.",
+            "Keep replies conversational, usually one or two short sentences, and under 45 words. Ask at most one gentle question.",
         )
         if line
     )
@@ -563,6 +634,32 @@ async def chat(body: ChatRequest) -> ChatTurnOut:
     )
 
 
+@app.post(
+    "/api/v1/local/chat",
+    response_model=LocalChatOut,
+    tags=["local-first"],
+    summary="Generate one response without storing companion or conversation data",
+    responses={502: {"model": ErrorEnvelope}, 503: {"model": ErrorEnvelope}, 504: {"model": ErrorEnvelope}},
+)
+async def local_first_chat(body: LocalChatRequest) -> LocalChatOut:
+    """Run a phone-owned chat turn without reading or writing application tables.
+
+    The bounded history is supplied by the phone on each request and truncated
+    again to the server's Groq context limit. Groq still receives the context
+    needed to answer; Saanjh itself does not persist it.
+    """
+    if DISTRESS_PATTERN.search(body.message):
+        raise HTTPException(status_code=422, detail=SAFETY_GUIDANCE)
+    history = body.history[-settings.groq_history_limit :]
+    messages = [
+        {"role": item.role.value, "content": item.content}
+        for item in history
+    ]
+    messages.append({"role": MessageRole.user.value, "content": body.message})
+    reply = await groq_chat(_system_prompt(body.companion), messages)
+    return LocalChatOut(reply=reply, model=settings.groq_model)
+
+
 @app.get(
     "/api/voicebox/health",
     tags=["voicebox"],
@@ -587,6 +684,10 @@ async def voicebox_profiles_proxy() -> Any:
     responses={502: {"model": ErrorEnvelope}, 503: {"model": ErrorEnvelope}, 504: {"model": ErrorEnvelope}},
 )
 async def voicebox_create_profile_proxy(body: VoiceboxProfileCreate) -> Any:
+    return await _create_voicebox_profile(body)
+
+
+async def _create_voicebox_profile(body: VoiceboxProfileCreate) -> Any:
     payload: dict[str, Any] = {
         "name": body.name,
         "language": body.language,
@@ -601,6 +702,270 @@ async def voicebox_create_profile_proxy(body: VoiceboxProfileCreate) -> Any:
         "/profiles",
         payload,
     )
+
+
+def _first_mapping(payload: Any, keys: tuple[str, ...]) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    for key in keys:
+        candidate = payload.get(key)
+        if isinstance(candidate, dict):
+            return candidate
+    return payload
+
+
+def _voicebox_profile_payload(payload: Any) -> dict[str, Any] | None:
+    return _first_mapping(payload, ("profile", "data", "result"))
+
+
+def _first_id(payload: Any, keys: tuple[str, ...]) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, (str, int)) and str(value).strip():
+            return str(value).strip()
+    for nested_key in ("profile", "data", "result", "generation", "job"):
+        value = payload.get(nested_key)
+        if isinstance(value, dict):
+            nested = _first_id(value, keys)
+            if nested:
+                return nested
+    return None
+
+
+def _voicebox_profile_id(payload: Any) -> str | None:
+    return _first_id(payload, ("id", "profile_id", "voice_id"))
+
+
+def _voicebox_generation_payload(payload: Any) -> dict[str, Any] | None:
+    return _first_mapping(payload, ("generation", "data", "result", "job"))
+
+
+def _voicebox_generation_id(payload: Any) -> str | None:
+    return _first_id(payload, ("id", "generation_id", "job_id", "task_id"))
+
+
+def _voicebox_generation_audio_path(payload: dict[str, Any]) -> str | None:
+    for key in ("audio_path", "audio_url", "output_path", "file_path", "path"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _voicebox_generation_error(payload: dict[str, Any]) -> str:
+    for key in ("error", "detail", "message", "reason"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:500]
+    return "Voicebox could not generate this audio."
+
+
+def _normalize_voicebox_generation(payload: Any) -> Any:
+    generation = _voicebox_generation_payload(payload)
+    if generation is None:
+        return payload
+
+    generation_id = _voicebox_generation_id(generation)
+    status = str(generation.get("status") or generation.get("state") or "").lower()
+    if status in {"failed", "error", "cancelled", "canceled"}:
+        raise UpstreamServiceError(
+            service="Voicebox",
+            code="generation_failed",
+            message=_voicebox_generation_error(generation),
+            status_code=502,
+        )
+
+    if generation_id:
+        generation["generation_id"] = generation_id
+        if status in {"completed", "complete", "done", "success", "succeeded"} or _voicebox_generation_audio_path(generation):
+            generation["audio_url"] = f"/api/voicebox/audio/{generation_id}"
+
+    if isinstance(payload, dict) and generation is not payload:
+        for key in ("generation", "data", "result", "job"):
+            if isinstance(payload.get(key), dict):
+                payload[key] = generation
+                break
+    return payload
+
+
+async def _attach_voicebox_sample(
+    profile_id: str,
+    *,
+    filename: str,
+    content: bytes,
+    content_type: str,
+    reference_text: str,
+) -> Any:
+    """Attach a cloned-voice sample across small Voicebox REST variants.
+
+    Voicebox builds in the wild have used different multipart names for the
+    audio part and transcript field. Only retry validation-style rejections;
+    timeouts, network failures, and server crashes are surfaced immediately.
+    """
+    variants = (
+        ("file", "reference_text"),
+        ("audio", "reference_text"),
+        ("sample", "reference_text"),
+        ("audio_file", "reference_text"),
+        ("file", "transcript"),
+        ("file", "text"),
+    )
+    last_error: UpstreamServiceError | None = None
+    for file_field, text_field in variants:
+        try:
+            return await voicebox_multipart(
+                f"/profiles/{profile_id}/samples",
+                filename=filename,
+                content=content,
+                content_type=content_type,
+                file_field=file_field,
+                fields={text_field: reference_text},
+            )
+        except UpstreamServiceError as exc:
+            last_error = exc
+            if exc.upstream_status not in {400, 415, 422}:
+                raise
+    if last_error:
+        raise last_error
+    raise UpstreamServiceError(
+        service="Voicebox",
+        code="sample_attach_failed",
+        message="Voicebox did not accept the sample upload.",
+        status_code=502,
+    )
+
+
+async def _assert_voicebox_profile_ready(profile_id: str) -> None:
+    """Ask Voicebox for a tiny synthesis so short/invalid samples fail at setup."""
+    payload: dict[str, Any] = {
+        "text": "This is a short Saanjh voice readiness check.",
+        "profile_id": profile_id,
+        "language": "en",
+        "personality": False,
+    }
+    if settings.voicebox_engine:
+        payload["engine"] = settings.voicebox_engine
+    try:
+        await voicebox_json("POST", "/generate", payload)
+    except UpstreamServiceError as exc:
+        message = exc.message.strip()
+        if re.search(r"audio prompt.*longer than\s*5\s*seconds|longer than\s*5\s*seconds", message, re.IGNORECASE):
+            raise UpstreamServiceError(
+                service="Voicebox",
+                code="sample_too_short",
+                message="Your voice sample is too short. Record or import at least 6 seconds of clear speech, then clone again.",
+                status_code=422,
+                upstream_status=exc.upstream_status,
+            ) from exc
+        raise
+
+
+
+@app.post(
+    "/api/voicebox/profiles/with-sample",
+    tags=["voicebox"],
+    summary="Atomically create a cloned profile and attach its consented sample",
+    responses={502: {"model": ErrorEnvelope}, 503: {"model": ErrorEnvelope}, 504: {"model": ErrorEnvelope}},
+)
+async def voicebox_create_profile_with_sample_proxy(
+    file: Annotated[UploadFile, File(description="A real, consented voice sample")],
+    reference_text: Annotated[str, Form(min_length=1, max_length=10000)],
+    name: Annotated[str, Form(min_length=1, max_length=120)],
+    language: Annotated[str, Form(min_length=2, max_length=20)] = "en",
+    voice_type: Annotated[str, Form(min_length=1, max_length=50)] = "cloned",
+    description: Annotated[str | None, Form(max_length=1000)] = None,
+    default_engine: Annotated[str | None, Form(max_length=120)] = None,
+) -> Any:
+    """Use one native-friendly multipart request and roll back partial profiles.
+
+    Mobile clients previously made one JSON request followed by a React Native
+    FormData upload. If the file bridge failed, Voicebox retained an empty
+    profile even though its health endpoint was green. This endpoint receives
+    the phone's native upload, creates the profile, attaches the sample, and
+    removes the new profile if attachment fails.
+    """
+    try:
+        filename, content, content_type = await _bounded_audio_upload(file)
+        remote_name = f"{name[:92].rstrip()} - Saanjh {token_hex(5)}"
+        created = await _create_voicebox_profile(
+            VoiceboxProfileCreate(
+                name=remote_name,
+                description=description,
+                language=language,
+                voice_type=voice_type,
+                default_engine=default_engine,
+            )
+        )
+    except UpstreamServiceError as exc:
+        raise UpstreamServiceError(
+            service="Voicebox",
+            code=f"profile_create_{exc.code}",
+            message=f"Voicebox profile creation failed: {exc.message}",
+            status_code=exc.status_code,
+            upstream_status=exc.upstream_status,
+        ) from exc
+
+    profile = _voicebox_profile_payload(created)
+    profile_id = _voicebox_profile_id(created)
+    if profile is None or profile_id is None:
+        raise UpstreamServiceError(
+            service="Voicebox",
+            code="invalid_response",
+            message="Voicebox created a profile without returning its identifier.",
+            status_code=502,
+        )
+
+    try:
+        sample = await _attach_voicebox_sample(
+            profile_id,
+            filename=filename,
+            content=content,
+            content_type=content_type,
+            reference_text=reference_text,
+        )
+    except Exception as sample_error:
+        try:
+            await voicebox_delete_profile(profile_id)
+        except Exception as cleanup_error:
+            raise UpstreamServiceError(
+                service="Voicebox",
+                code="sample_failed_cleanup_failed",
+                message=(
+                    f"The voice sample could not be registered and Voicebox could not remove "
+                    f"the partial profile {profile_id}. Retry cleanup from Saanjh settings."
+                ),
+                status_code=502,
+            ) from cleanup_error
+        if isinstance(sample_error, UpstreamServiceError):
+            raise UpstreamServiceError(
+                service="Voicebox",
+                code=f"sample_attach_{sample_error.code}",
+                message=f"Voicebox sample attachment failed: {sample_error.message}",
+                status_code=sample_error.status_code,
+                upstream_status=sample_error.upstream_status,
+            ) from sample_error
+        raise sample_error
+
+    try:
+        await _assert_voicebox_profile_ready(profile_id)
+    except Exception as readiness_error:
+        try:
+            await voicebox_delete_profile(profile_id)
+        except Exception as cleanup_error:
+            raise UpstreamServiceError(
+                service="Voicebox",
+                code="readiness_failed_cleanup_failed",
+                message=(
+                    f"The voice sample could not be used and Voicebox could not remove "
+                    f"the partial profile {profile_id}. Retry cleanup from Saanjh settings."
+                ),
+                status_code=502,
+            ) from cleanup_error
+        raise readiness_error
+
+    return {"profile": profile, "sample": sample}
 
 
 @app.delete(
@@ -697,20 +1062,7 @@ async def voicebox_generate_proxy(body: VoiceboxGenerateRequest) -> Any:
     if engine:
         payload["engine"] = engine
     result = await voicebox_json("POST", "/generate", payload)
-    if isinstance(result, dict):
-        generation_id = result.get("id") or result.get("generation_id")
-        status = str(result.get("status") or "").lower()
-        if status in {"failed", "error", "cancelled"}:
-            message = result.get("error") or result.get("detail") or "Voicebox could not generate this audio."
-            raise UpstreamServiceError(
-                service="Voicebox",
-                code="generation_failed",
-                message=str(message)[:500],
-                status_code=502,
-            )
-        if generation_id and (status == "completed" or result.get("audio_path")):
-            result["audio_url"] = f"/api/voicebox/audio/{generation_id}"
-    return result
+    return _normalize_voicebox_generation(result)
 
 
 @app.get(
@@ -722,19 +1074,27 @@ async def voicebox_generation_status_proxy(
     generation_id: Annotated[str, Path(min_length=1, max_length=255, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")],
 ) -> Any:
     result = await voicebox_json("GET", f"/history/{generation_id}")
-    if isinstance(result, dict):
-        status = str(result.get("status") or "").lower()
-        if status in {"failed", "error", "cancelled"}:
-            message = result.get("error") or result.get("detail") or "Voicebox could not generate this audio."
-            raise UpstreamServiceError(
-                service="Voicebox",
-                code="generation_failed",
-                message=str(message)[:500],
-                status_code=502,
-            )
-        if status == "completed" or result.get("audio_path"):
-            result["audio_url"] = f"/api/voicebox/audio/{generation_id}"
-    return result
+    normalized = _normalize_voicebox_generation(result)
+    if isinstance(normalized, dict):
+        generation = _voicebox_generation_payload(normalized)
+        if generation is not None and not _voicebox_generation_id(generation):
+            generation["generation_id"] = generation_id
+            status = str(generation.get("status") or generation.get("state") or "").lower()
+            if status in {"completed", "complete", "done", "success", "succeeded"} or _voicebox_generation_audio_path(generation):
+                generation["audio_url"] = f"/api/voicebox/audio/{generation_id}"
+    return normalized
+
+
+@app.post(
+    "/api/voicebox/generate/{generation_id}/cancel",
+    tags=["voicebox"],
+    responses={400: {"model": ErrorEnvelope}, 502: {"model": ErrorEnvelope}, 503: {"model": ErrorEnvelope}, 504: {"model": ErrorEnvelope}},
+)
+async def voicebox_generation_cancel_proxy(
+    generation_id: Annotated[str, Path(min_length=1, max_length=255, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")],
+) -> Any:
+    """Cancel a queued/active Voicebox job when the mobile user abandons it."""
+    return await voicebox_json("POST", f"/generate/{generation_id}/cancel")
 
 
 @app.get(

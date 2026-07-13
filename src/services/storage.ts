@@ -30,6 +30,7 @@ function normalizeSettings(value: unknown): AppSettings {
   const empty = createEmptyAppData().settings;
   if (!isObject(value)) return empty;
   return {
+    apiBaseUrl: typeof value.apiBaseUrl === 'string' ? value.apiBaseUrl.trim() : empty.apiBaseUrl,
     allowTranscripts:
       typeof value.allowTranscripts === 'boolean' ? value.allowTranscripts : empty.allowTranscripts,
     reducedMotion: typeof value.reducedMotion === 'boolean' ? value.reducedMotion : empty.reducedMotion,

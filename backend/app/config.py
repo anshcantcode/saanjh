@@ -59,10 +59,24 @@ def _http_url(name: str, required: bool = False) -> str:
     return value
 
 
+def _api_token() -> str:
+    """Return the optional private-gateway bearer token.
+
+    An empty value intentionally keeps local development backwards compatible.
+    Once enabled, require enough entropy that the token is not realistically
+    guessable over a public tunnel.
+    """
+    value = os.getenv("SAANJH_API_TOKEN", "").strip()
+    if value and len(value) < 32:
+        raise RuntimeError("SAANJH_API_TOKEN must contain at least 32 characters when configured.")
+    return value
+
+
 @dataclass(frozen=True)
 class Settings:
     database_path: Path
     cors_origins: tuple[str, ...]
+    api_token: str
     groq_api_key: str
     groq_model: str
     groq_base_url: str
@@ -80,6 +94,7 @@ def get_settings() -> Settings:
     return Settings(
         database_path=_database_path(),
         cors_origins=_origins(),
+        api_token=_api_token(),
         groq_api_key=os.getenv("GROQ_API_KEY", "").strip(),
         groq_model=os.getenv("GROQ_MODEL", "llama-3.1-8b-instant").strip(),
         groq_base_url=_http_url("GROQ_BASE_URL") or "https://api.groq.com/openai/v1",

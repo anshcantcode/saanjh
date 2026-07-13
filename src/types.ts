@@ -95,6 +95,8 @@ export interface SessionEntry {
 }
 
 export interface AppSettings {
+  /** Public HTTPS FastAPI address; user-editable so a tunnel change never requires rebuilding the APK. */
+  apiBaseUrl: string;
   allowTranscripts: boolean;
   reducedMotion: boolean;
 }
@@ -121,6 +123,7 @@ export function createEmptyAppData(): AppData {
     sessions: [],
     pendingVoiceboxProfileIds: [],
     settings: {
+      apiBaseUrl: '',
       allowTranscripts: false,
       reducedMotion: false,
     },
