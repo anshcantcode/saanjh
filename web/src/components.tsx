@@ -3,11 +3,11 @@ import { Icon, type IconName } from './Icon';
 
 export function Brand({ compact = false, inverse = false }: { compact?: boolean; inverse?: boolean }) {
   return (
-    <div className={`brand ${compact ? 'brand--compact' : ''} ${inverse ? 'brand--inverse' : ''}`} aria-label="Saanjh">
+    <div className={`brand ${compact ? 'brand--compact' : ''} ${inverse ? 'brand--inverse' : ''}`} aria-label="Saanjh — your voice companion">
       <img src="/assets/botanical-emblem.webp" alt="" className="brand__mark" />
       <div className="brand__word-wrap">
         <span className="brand__word">saanjh</span>
-        {!compact && <span className="brand__tagline">a familiar voice, held with care</span>}
+        {!compact && <span className="brand__tagline">your voice companion</span>}
       </div>
     </div>
   );
