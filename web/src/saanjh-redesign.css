@@ -1,0 +1,1180 @@
+/*
+ * Saanjh botanical redesign
+ * Visual language: parchment, muted sage, deep forest, antique brass,
+ * editorial Playfair typography, quiet landscape imagery and line-art botanicals.
+ * Loaded after styles.css so the application logic and accessibility remain intact.
+ */
+
+:root {
+  --moss-950: #1c2a23;
+  --moss-900: #24372d;
+  --moss-800: #2e3e34;
+  --moss-700: #43584a;
+  --fern: #788975;
+  --sage: #9dae9a;
+  --sage-soft: #d8e1d2;
+  --mist: #e6eadf;
+  --cream: #f6f2eb;
+  --cream-light: #fbf8f2;
+  --paper: #ede6d8;
+  --paper-deep: #e4dac8;
+  --clay: #b56a5a;
+  --clay-soft: #f0ddd5;
+  --gold: #c8a66b;
+  --gold-soft: #eadbb8;
+  --ink: #1c2a23;
+  --muted: #68736b;
+  --line: rgba(46, 62, 52, 0.13);
+  --line-strong: rgba(46, 62, 52, 0.25);
+  --danger: #a65e50;
+  --danger-soft: #f3dfd9;
+  --shadow-sm: 0 8px 24px rgba(28, 42, 35, 0.055);
+  --shadow-md: 0 20px 52px rgba(28, 42, 35, 0.085);
+  --shadow-lg: 0 34px 90px rgba(20, 32, 26, 0.15);
+  --radius-xs: 12px;
+  --radius-sm: 16px;
+  --radius-md: 22px;
+  --radius-lg: 30px;
+  --radius-xl: 42px;
+}
+
+html {
+  background: var(--cream);
+}
+
+body {
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 12% 10%, rgba(200, 183, 147, 0.16), transparent 28rem),
+    radial-gradient(circle at 88% 80%, rgba(157, 174, 154, 0.14), transparent 34rem),
+    linear-gradient(rgba(246, 242, 235, 0.965), rgba(246, 242, 235, 0.965)),
+    url('/assets/paper-topography.webp') center / 720px repeat;
+}
+
+body::before,
+body::after {
+  position: fixed;
+  z-index: -1;
+  content: '';
+  pointer-events: none;
+}
+
+body::before {
+  top: -140px;
+  right: -130px;
+  width: 440px;
+  height: 560px;
+  opacity: 0.11;
+  background: url('/assets/consent-botanical.webp') center / cover no-repeat;
+  filter: sepia(0.28) saturate(0.55);
+  transform: rotate(-7deg);
+}
+
+body::after {
+  bottom: -170px;
+  left: -150px;
+  width: 500px;
+  height: 600px;
+  opacity: 0.08;
+  background: url('/assets/consent-botanical.webp') center / cover no-repeat;
+  filter: sepia(0.28) saturate(0.55);
+  transform: rotate(173deg);
+}
+
+::selection {
+  color: var(--cream-light);
+  background: var(--moss-700);
+}
+
+.paper-surface {
+  background:
+    linear-gradient(rgba(251, 248, 242, 0.965), rgba(251, 248, 242, 0.965)),
+    url('/assets/paper-topography.webp') center / 720px repeat;
+}
+
+h1,
+h2,
+h3 {
+  text-wrap: balance;
+}
+
+p {
+  text-wrap: pretty;
+}
+
+.app-shell {
+  position: relative;
+  isolation: isolate;
+}
+
+.app-stage {
+  position: relative;
+  background:
+    linear-gradient(180deg, rgba(251, 248, 242, 0.52), rgba(246, 242, 235, 0.72));
+}
+
+.app-stage::before {
+  position: fixed;
+  z-index: -1;
+  right: 2vw;
+  bottom: 3vh;
+  width: min(42vw, 620px);
+  aspect-ratio: 1.8;
+  border-radius: 999px 999px 0 0;
+  content: '';
+  opacity: 0.07;
+  background: url('/assets/home-forest-path.webp') center / cover no-repeat;
+  mask-image: linear-gradient(to top, #000 35%, transparent 100%);
+  pointer-events: none;
+}
+
+.main-content {
+  width: min(100%, 1180px);
+}
+
+.screen {
+  padding-top: 34px;
+}
+
+.mobile-topbar {
+  border-bottom-color: rgba(46, 62, 52, 0.1);
+  background:
+    linear-gradient(rgba(251, 248, 242, 0.92), rgba(251, 248, 242, 0.92)),
+    url('/assets/paper-topography.webp') center / 700px;
+  backdrop-filter: blur(18px);
+}
+
+.mobile-topbar > button {
+  border: 1px solid var(--line);
+  background: rgba(237, 230, 216, 0.6);
+}
+
+.mobile-nav {
+  border-top-color: rgba(46, 62, 52, 0.1);
+  background:
+    linear-gradient(rgba(251, 248, 242, 0.94), rgba(251, 248, 242, 0.94)),
+    url('/assets/paper-topography.webp') center / 700px;
+  backdrop-filter: blur(20px);
+}
+
+.mobile-nav button {
+  border-radius: 15px;
+  letter-spacing: 0.02em;
+}
+
+.mobile-nav button.is-active {
+  color: var(--cream-light);
+  background: var(--moss-800);
+  box-shadow: 0 10px 24px rgba(28, 42, 35, 0.18);
+}
+
+.brand {
+  gap: 12px;
+}
+
+.brand__mark {
+  width: 48px;
+  height: 59px;
+  border: 1px solid rgba(200, 166, 107, 0.52);
+  border-radius: 24px 24px 15px 15px;
+  background: var(--cream-light);
+  box-shadow: inset 0 0 0 4px rgba(246, 242, 235, 0.68);
+  mix-blend-mode: normal;
+}
+
+.brand__word {
+  color: var(--moss-950);
+  font-size: 36px;
+  letter-spacing: -0.065em;
+}
+
+.brand__tagline {
+  color: var(--moss-700);
+  font-size: 7.5px;
+  letter-spacing: 0.25em;
+}
+
+.brand--compact .brand__mark {
+  width: 34px;
+  height: 40px;
+  border-radius: 17px 17px 11px 11px;
+}
+
+.brand--inverse .brand__word,
+.brand--inverse .brand__tagline {
+  color: var(--cream-light);
+}
+
+.eyebrow {
+  color: var(--moss-700);
+  font-size: 8.5px;
+  letter-spacing: 0.22em;
+}
+
+.page-header {
+  position: relative;
+  margin-bottom: 34px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--line);
+}
+
+.page-header::after {
+  display: block;
+  width: 86px;
+  height: 9px;
+  margin-top: 18px;
+  content: '';
+  opacity: 0.54;
+  background:
+    linear-gradient(var(--gold), var(--gold)) center / 100% 1px no-repeat,
+    radial-gradient(circle, var(--gold) 0 2px, transparent 2.5px) center / 9px 9px no-repeat;
+}
+
+.page-header h1 {
+  max-width: 800px;
+  color: var(--moss-950);
+  font-size: clamp(43px, 10vw, 76px);
+  line-height: 0.94;
+}
+
+.page-header__description {
+  max-width: 650px;
+  font-size: 12px;
+  line-height: 1.75;
+}
+
+.button {
+  min-height: 50px;
+  border-radius: 999px;
+  padding-inline: 22px;
+  letter-spacing: 0.01em;
+}
+
+.button--primary {
+  background: var(--moss-800);
+  box-shadow: 0 14px 30px rgba(28, 42, 35, 0.17);
+}
+
+.button--primary:hover:not(:disabled) {
+  background: var(--moss-950);
+  box-shadow: 0 18px 36px rgba(28, 42, 35, 0.22);
+}
+
+.button--secondary,
+.button--cream {
+  border-color: rgba(46, 62, 52, 0.18);
+  background: rgba(251, 248, 242, 0.82);
+}
+
+.button--ghost {
+  border: 1px solid transparent;
+}
+
+.button--ghost:hover:not(:disabled) {
+  border-color: var(--line);
+  background: rgba(237, 230, 216, 0.56);
+}
+
+.icon-button {
+  border-color: rgba(46, 62, 52, 0.14);
+  background: rgba(251, 248, 242, 0.78);
+  box-shadow: 0 6px 18px rgba(28, 42, 35, 0.04);
+}
+
+.badge {
+  padding: 7px 11px;
+  border-color: rgba(46, 62, 52, 0.11);
+  background: rgba(216, 225, 210, 0.72);
+  letter-spacing: 0.04em;
+}
+
+.badge--cream {
+  background: rgba(251, 248, 242, 0.9);
+}
+
+.badge--clay {
+  color: #8d4f42;
+  background: rgba(240, 221, 213, 0.9);
+}
+
+.badge--gold {
+  background: rgba(234, 219, 184, 0.9);
+}
+
+.field input,
+.field textarea,
+.inline-form input,
+.chat-composer textarea {
+  border-color: rgba(46, 62, 52, 0.14);
+  border-radius: var(--radius-sm);
+  background:
+    linear-gradient(rgba(251, 248, 242, 0.86), rgba(251, 248, 242, 0.86)),
+    url('/assets/paper-topography.webp') center / 700px;
+}
+
+.field input:focus,
+.field textarea:focus,
+.inline-form input:focus,
+.chat-composer textarea:focus {
+  border-color: rgba(67, 88, 74, 0.54);
+  box-shadow: 0 0 0 4px rgba(157, 174, 154, 0.14);
+}
+
+.notice,
+.error-banner,
+.service-readiness,
+.backend-address,
+.setting-row {
+  border-radius: var(--radius-md);
+}
+
+.notice {
+  border-color: rgba(46, 62, 52, 0.09);
+  background: rgba(216, 225, 210, 0.58);
+}
+
+.notice--cream {
+  background: rgba(251, 248, 242, 0.78);
+}
+
+.notice--dark {
+  border-color: rgba(234, 219, 184, 0.15);
+  background:
+    radial-gradient(circle at 90% 0%, rgba(200, 166, 107, 0.14), transparent 32%),
+    var(--moss-950);
+}
+
+.empty-state,
+.soft-card,
+.ritual-card,
+.choice-card,
+.sample-action,
+.companion-hero,
+.preview-card,
+.precall-card,
+.service-card,
+.journal-entry,
+.danger-zone {
+  border-color: rgba(46, 62, 52, 0.12);
+}
+
+.empty-state {
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+}
+
+.empty-state__image-wrap {
+  min-height: 350px;
+}
+
+.empty-state__copy {
+  background: linear-gradient(transparent, rgba(28, 42, 35, 0.94) 31%, var(--moss-950));
+}
+
+.empty-state__copy h2 {
+  letter-spacing: -0.045em;
+}
+
+.section {
+  margin-top: 44px;
+}
+
+.section__heading {
+  margin-bottom: 18px;
+}
+
+.section__heading h2 {
+  color: var(--moss-950);
+  font-size: clamp(30px, 6vw, 42px);
+}
+
+.chip {
+  border-color: rgba(46, 62, 52, 0.14);
+  background: rgba(251, 248, 242, 0.72);
+}
+
+.chip.is-selected {
+  color: var(--cream-light);
+  background: var(--moss-700);
+}
+
+/* Today */
+.today-heading {
+  align-items: center;
+  margin-bottom: 28px;
+}
+
+.today-heading h1 {
+  color: var(--moss-950);
+  font-size: clamp(48px, 11vw, 78px);
+  letter-spacing: -0.055em;
+}
+
+.profile-orb {
+  width: 64px;
+  height: 64px;
+  border: 1px solid rgba(200, 166, 107, 0.46);
+  box-shadow: 0 12px 30px rgba(28, 42, 35, 0.11);
+}
+
+.forest-hero {
+  min-height: 360px;
+  border: 1px solid rgba(46, 62, 52, 0.12);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+}
+
+.forest-hero::after {
+  position: absolute;
+  z-index: 1;
+  top: 28px;
+  right: 28px;
+  width: 82px;
+  height: 105px;
+  border: 1px solid rgba(234, 219, 184, 0.72);
+  border-radius: 48px 48px 18px 18px;
+  content: '';
+  opacity: 0.62;
+  background: url('/assets/botanical-emblem.webp') center / cover no-repeat;
+  box-shadow: inset 0 0 0 5px rgba(28, 42, 35, 0.12);
+}
+
+.forest-hero__wash {
+  background: linear-gradient(90deg, rgba(251, 248, 242, 0.99) 0%, rgba(251, 248, 242, 0.91) 43%, rgba(251, 248, 242, 0.12) 82%, transparent 100%);
+}
+
+.forest-hero__copy {
+  min-height: 360px;
+  padding: 34px 26px;
+}
+
+.forest-hero__copy h2 {
+  color: var(--moss-950);
+  font-size: clamp(44px, 10vw, 68px);
+}
+
+.action-grid {
+  gap: 12px;
+}
+
+.ritual-card {
+  border-radius: var(--radius-md);
+  background: rgba(251, 248, 242, 0.7);
+  box-shadow: 0 9px 28px rgba(28, 42, 35, 0.045);
+}
+
+.ritual-card__icon,
+.soft-card__heading > span {
+  border: 1px solid rgba(46, 62, 52, 0.08);
+}
+
+.soft-card {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+  background:
+    linear-gradient(rgba(237, 230, 216, 0.72), rgba(237, 230, 216, 0.72)),
+    url('/assets/paper-topography.webp') center / 660px;
+}
+
+.soft-card::after {
+  position: absolute;
+  right: -24px;
+  bottom: -32px;
+  width: 110px;
+  height: 140px;
+  content: '';
+  opacity: 0.08;
+  background: url('/assets/consent-botanical.webp') center / cover;
+}
+
+.trust-strip > div {
+  border-radius: var(--radius-sm);
+  background: rgba(251, 248, 242, 0.7);
+}
+
+/* Setup */
+.setup-screen {
+  background:
+    linear-gradient(90deg, rgba(28, 42, 35, 0.02), transparent 45%),
+    var(--cream);
+}
+
+.setup-panel {
+  background:
+    linear-gradient(rgba(246, 242, 235, 0.965), rgba(246, 242, 235, 0.965)),
+    url('/assets/paper-topography.webp') center / 700px;
+}
+
+.progress {
+  height: 2px;
+  background: rgba(46, 62, 52, 0.12);
+}
+
+.progress i {
+  background: linear-gradient(90deg, var(--moss-700), var(--gold));
+}
+
+.setup-content > h1 {
+  color: var(--moss-950);
+  font-size: clamp(46px, 10vw, 72px);
+}
+
+.choice-card,
+.sample-action,
+.consent-check,
+.file-ready {
+  border-radius: var(--radius-md);
+  background: rgba(251, 248, 242, 0.72);
+}
+
+.choice-card.is-selected,
+.consent-check.is-selected {
+  border-color: rgba(67, 88, 74, 0.34);
+  background: rgba(216, 225, 210, 0.58);
+}
+
+.consent-illustration {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+}
+
+/* Mood */
+.mood-screen__veil {
+  background:
+    radial-gradient(circle at 50% 38%, rgba(251, 248, 242, 0.68), transparent 21rem),
+    linear-gradient(rgba(246, 242, 235, 0.98) 0%, rgba(246, 242, 235, 0.78) 52%, rgba(28, 42, 35, 0.18) 100%);
+}
+
+.mood-picker button {
+  border-color: rgba(46, 62, 52, 0.08);
+  border-radius: var(--radius-sm);
+  background: rgba(251, 248, 242, 0.58);
+}
+
+.mood-picker button.is-selected {
+  background: var(--moss-800);
+}
+
+.mood-ripple > i {
+  border-color: rgba(200, 166, 107, 0.5);
+}
+
+.mood-ripple > span {
+  border: 1px solid rgba(234, 219, 184, 0.42);
+  background: var(--moss-800);
+}
+
+/* Companion */
+.companion-hero {
+  padding: 30px;
+  border-radius: var(--radius-lg);
+  background:
+    linear-gradient(rgba(251, 248, 242, 0.79), rgba(251, 248, 242, 0.9)),
+    url('/assets/consent-botanical.webp') center / cover;
+  box-shadow: var(--shadow-md);
+}
+
+.companion-hero__botanical {
+  opacity: 0.09;
+}
+
+.companion-portrait {
+  width: 128px;
+  height: 150px;
+}
+
+.companion-portrait > img {
+  border: 1px solid rgba(200, 166, 107, 0.46);
+  border-radius: 70px 70px 26px 26px;
+  box-shadow: inset 0 0 0 5px var(--cream-light), var(--shadow-md);
+}
+
+.preview-card {
+  border-radius: var(--radius-md);
+  background:
+    linear-gradient(rgba(237, 230, 216, 0.7), rgba(237, 230, 216, 0.7)),
+    url('/assets/paper-topography.webp') center / 680px;
+}
+
+.memory-list > div,
+.inline-form {
+  border-radius: var(--radius-sm);
+}
+
+.danger-zone {
+  border-radius: var(--radius-md);
+  background: rgba(240, 221, 213, 0.48);
+}
+
+/* Text conversation */
+.chat-screen {
+  background:
+    radial-gradient(circle at 70% 0%, rgba(216, 225, 210, 0.38), transparent 28rem),
+    linear-gradient(rgba(246, 242, 235, 0.94), rgba(246, 242, 235, 0.94)),
+    url('/assets/paper-topography.webp') center / 700px;
+}
+
+.chat-header {
+  border-bottom: 1px solid var(--line);
+  background: rgba(251, 248, 242, 0.88);
+  backdrop-filter: blur(18px);
+}
+
+.chat-person img {
+  border: 1px solid rgba(200, 166, 107, 0.36);
+  background: var(--paper);
+}
+
+.conversation-empty > span {
+  border: 1px solid rgba(200, 166, 107, 0.3);
+  background: rgba(237, 230, 216, 0.7);
+}
+
+.message {
+  border: 1px solid rgba(46, 62, 52, 0.1);
+  border-radius: 22px 22px 22px 8px;
+  box-shadow: 0 8px 26px rgba(28, 42, 35, 0.045);
+}
+
+.message--assistant {
+  background:
+    linear-gradient(rgba(251, 248, 242, 0.88), rgba(251, 248, 242, 0.88)),
+    url('/assets/paper-topography.webp') center / 620px;
+}
+
+.message--user {
+  border-radius: 22px 22px 8px 22px;
+  color: var(--cream-light);
+  background: var(--moss-800);
+}
+
+.chat-composer {
+  border: 1px solid rgba(46, 62, 52, 0.12);
+  border-radius: 999px;
+  background: rgba(251, 248, 242, 0.88);
+  box-shadow: 0 18px 44px rgba(28, 42, 35, 0.1);
+  backdrop-filter: blur(18px);
+}
+
+/* Before call */
+.precall-profile,
+.precall-card {
+  border-radius: var(--radius-lg);
+}
+
+.precall-profile {
+  background:
+    linear-gradient(100deg, rgba(251, 248, 242, 0.94), rgba(216, 225, 210, 0.65)),
+    url('/assets/consent-botanical.webp') center / cover;
+}
+
+.precall-profile__avatar {
+  border: 1px solid rgba(200, 166, 107, 0.45);
+  border-radius: 48px 48px 17px 17px;
+}
+
+.precall-card {
+  background:
+    linear-gradient(rgba(237, 230, 216, 0.68), rgba(237, 230, 216, 0.68)),
+    url('/assets/paper-topography.webp') center / 680px;
+}
+
+/* Voice call */
+.voice-session {
+  background: var(--moss-950);
+}
+
+.voice-session__shade {
+  background:
+    radial-gradient(circle at 50% 48%, rgba(200, 166, 107, 0.12), transparent 24rem),
+    linear-gradient(180deg, rgba(19, 34, 27, 0.42), rgba(19, 34, 27, 0.88));
+}
+
+.voice-session__identity h1 {
+  color: var(--cream-light);
+  font-size: clamp(54px, 12vw, 88px);
+}
+
+.presence-ring > i {
+  border-color: rgba(234, 219, 184, 0.27);
+}
+
+.presence-ring > span {
+  border: 1px solid rgba(234, 219, 184, 0.46);
+  color: var(--gold-soft);
+  background: rgba(28, 42, 35, 0.86);
+  box-shadow: 0 0 70px rgba(200, 166, 107, 0.18);
+}
+
+.voice-wave i {
+  background: linear-gradient(var(--gold-soft), var(--gold));
+}
+
+.voice-captions {
+  border: 1px solid rgba(234, 219, 184, 0.11);
+  border-radius: var(--radius-lg);
+  background: rgba(20, 32, 26, 0.36);
+  backdrop-filter: blur(18px);
+}
+
+.voice-control {
+  border-color: rgba(255, 255, 255, 0.14);
+  backdrop-filter: blur(16px);
+}
+
+.voice-control--mic {
+  color: var(--moss-950);
+  background: var(--cream-light);
+}
+
+.voice-control--end {
+  background: var(--clay);
+}
+
+/* Aftercare and safety */
+.aftercare-screen,
+.safety-screen {
+  background:
+    linear-gradient(rgba(246, 242, 235, 0.96), rgba(246, 242, 235, 0.96)),
+    url('/assets/paper-topography.webp') center / 700px;
+}
+
+.aftercare-screen__image,
+.safety-screen__art {
+  overflow: hidden;
+}
+
+.aftercare-screen__panel h1,
+.safety-screen__content h1 {
+  color: var(--moss-950);
+  font-size: clamp(50px, 10vw, 82px);
+}
+
+.safety-actions article {
+  border-color: rgba(181, 106, 90, 0.16);
+  border-radius: var(--radius-md);
+  background: rgba(251, 248, 242, 0.66);
+}
+
+.safety-actions article > span {
+  color: var(--clay);
+  font-family: var(--serif);
+}
+
+/* Journal */
+.journal-feature {
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+}
+
+.journal-feature::after {
+  position: absolute;
+  inset: 0;
+  content: '';
+  background: linear-gradient(90deg, rgba(28, 42, 35, 0.86), rgba(28, 42, 35, 0.18));
+  pointer-events: none;
+}
+
+.journal-feature > div {
+  z-index: 2;
+}
+
+.journal-entry {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+  background:
+    linear-gradient(rgba(251, 248, 242, 0.78), rgba(251, 248, 242, 0.78)),
+    url('/assets/paper-topography.webp') center / 650px;
+}
+
+.journal-entry::after {
+  position: absolute;
+  right: -20px;
+  bottom: -34px;
+  width: 96px;
+  height: 128px;
+  content: '';
+  opacity: 0.07;
+  background: url('/assets/consent-botanical.webp') center / cover;
+}
+
+.modal-backdrop {
+  background: rgba(28, 42, 35, 0.42);
+  backdrop-filter: blur(12px);
+}
+
+.sheet {
+  border: 1px solid rgba(46, 62, 52, 0.12);
+  border-radius: 32px 32px 0 0;
+  box-shadow: 0 -24px 70px rgba(28, 42, 35, 0.17);
+}
+
+/* Settings */
+.settings-section {
+  border-top-color: var(--line);
+}
+
+.service-card {
+  border-radius: var(--radius-md);
+  background: rgba(251, 248, 242, 0.68);
+  box-shadow: 0 9px 28px rgba(28, 42, 35, 0.04);
+}
+
+.service-card__icon,
+.setting-row__icon {
+  border: 1px solid rgba(46, 62, 52, 0.08);
+  background: rgba(216, 225, 210, 0.7);
+}
+
+.backend-address {
+  background:
+    linear-gradient(rgba(237, 230, 216, 0.68), rgba(237, 230, 216, 0.68)),
+    url('/assets/paper-topography.webp') center / 640px;
+}
+
+.setting-row {
+  border: 1px solid rgba(46, 62, 52, 0.11);
+  background: rgba(251, 248, 242, 0.66);
+}
+
+.switch {
+  background: var(--paper-deep);
+}
+
+.switch.is-on {
+  background: var(--moss-700);
+}
+
+/* Desktop editorial layout */
+@media (min-width: 960px) {
+  .app-shell {
+    display: grid;
+    grid-template-columns: 278px minmax(0, 1fr);
+  }
+
+  .sidebar {
+    position: sticky;
+    top: 0;
+    display: flex;
+    height: 100vh;
+    overflow: hidden;
+    flex-direction: column;
+    padding: 30px 24px 24px;
+    border-right: 1px solid rgba(234, 219, 184, 0.12);
+    color: var(--cream-light);
+    background:
+      linear-gradient(180deg, rgba(28, 42, 35, 0.88), rgba(28, 42, 35, 0.98)),
+      url('/assets/session-forest-night.webp') center / cover no-repeat;
+    box-shadow: 18px 0 60px rgba(28, 42, 35, 0.08);
+  }
+
+  .sidebar::before {
+    position: absolute;
+    inset: auto -26px 68px auto;
+    width: 190px;
+    height: 280px;
+    content: '';
+    opacity: 0.17;
+    background: url('/assets/consent-botanical.webp') center / cover;
+    filter: brightness(1.8) sepia(0.5);
+    transform: rotate(-8deg);
+    pointer-events: none;
+  }
+
+  .sidebar .brand__mark {
+    border-color: rgba(234, 219, 184, 0.38);
+    background: rgba(251, 248, 242, 0.9);
+  }
+
+  .sidebar .brand__word,
+  .sidebar .brand__tagline {
+    color: var(--cream-light);
+  }
+
+  .sidebar nav {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    margin-top: 52px;
+  }
+
+  .sidebar nav button {
+    display: grid;
+    min-height: 52px;
+    grid-template-columns: 22px 1fr 8px;
+    align-items: center;
+    gap: 12px;
+    padding: 0 15px;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    color: rgba(246, 242, 235, 0.62);
+    background: transparent;
+    text-align: left;
+    transition: color 170ms ease, background 170ms ease, border-color 170ms ease, transform 170ms ease;
+  }
+
+  .sidebar nav button:hover {
+    color: var(--cream-light);
+    transform: translateX(3px);
+  }
+
+  .sidebar nav button.is-active {
+    border-color: rgba(234, 219, 184, 0.14);
+    color: var(--moss-950);
+    background: var(--cream-light);
+    box-shadow: 0 15px 34px rgba(10, 20, 15, 0.2);
+  }
+
+  .sidebar nav button i {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--gold);
+  }
+
+  .sidebar__footer {
+    position: relative;
+    z-index: 1;
+    margin-top: auto;
+    color: rgba(246, 242, 235, 0.64);
+  }
+
+  .sidebar__footer p {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-top: 16px;
+    border-top: 1px solid rgba(234, 219, 184, 0.12);
+    font-size: 9px;
+    letter-spacing: 0.04em;
+  }
+
+  .sidebar__services {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-bottom: 14px;
+  }
+
+  .sidebar__services span {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: rgba(246, 242, 235, 0.26);
+  }
+
+  .sidebar__services span.is-online {
+    background: #a8bd9f;
+    box-shadow: 0 0 0 4px rgba(168, 189, 159, 0.12);
+  }
+
+  .sidebar__services small {
+    font-size: 9px;
+  }
+
+  .mobile-topbar,
+  .mobile-nav {
+    display: none;
+  }
+
+  .main-content {
+    min-height: 100vh;
+    padding-bottom: 0;
+  }
+
+  .screen {
+    padding: 58px clamp(44px, 6vw, 84px) 80px;
+  }
+
+  .today-heading h1 {
+    font-size: clamp(64px, 7vw, 92px);
+  }
+
+  .forest-hero {
+    min-height: 430px;
+  }
+
+  .forest-hero__copy {
+    min-height: 430px;
+    padding: 48px 52px;
+  }
+
+  .action-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .ritual-card {
+    min-height: 154px;
+    grid-template-columns: 48px 1fr;
+    align-content: center;
+  }
+
+  .ritual-card > svg {
+    display: none;
+  }
+
+  .dashboard-grid,
+  .service-cards,
+  .privacy-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .setup-screen {
+    display: grid;
+    grid-template-columns: minmax(360px, 0.82fr) minmax(560px, 1.18fr);
+  }
+
+  .setup-art {
+    position: sticky;
+    top: 0;
+    display: block;
+    height: 100vh;
+    overflow: hidden;
+    background: var(--moss-950);
+  }
+
+  .setup-art img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .setup-art::after {
+    position: absolute;
+    inset: 0;
+    content: '';
+    background:
+      linear-gradient(180deg, rgba(28, 42, 35, 0.16), rgba(28, 42, 35, 0.78)),
+      radial-gradient(circle at 50% 36%, transparent, rgba(28, 42, 35, 0.3));
+  }
+
+  .setup-panel {
+    padding: 38px clamp(46px, 7vw, 92px) 64px;
+  }
+
+  .setup-content {
+    max-width: 760px;
+  }
+
+  .choice-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .sample-action {
+    min-height: 178px;
+  }
+
+  .mood-screen__content {
+    padding-top: 52px;
+  }
+
+  .companion-hero {
+    grid-template-columns: 150px minmax(0, 1fr) auto;
+    text-align: left;
+  }
+
+  .companion-portrait {
+    justify-self: start;
+  }
+
+  .companion-actions {
+    align-self: end;
+  }
+
+  .precall-profile {
+    grid-template-columns: 170px 94px minmax(0, 1fr) auto;
+  }
+
+  .aftercare-screen,
+  .safety-screen {
+    display: grid;
+    grid-template-columns: minmax(360px, 0.95fr) minmax(580px, 1.05fr);
+    min-height: 100vh;
+  }
+
+  .aftercare-screen__image,
+  .safety-screen__art {
+    position: sticky;
+    top: 0;
+    height: 100vh;
+  }
+
+  .aftercare-screen__image img,
+  .safety-screen__art img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .aftercare-screen__panel,
+  .safety-screen__content {
+    align-self: center;
+    padding: 64px clamp(50px, 7vw, 96px);
+  }
+
+  .journal-layout {
+    grid-template-columns: minmax(330px, 0.8fr) minmax(0, 1.2fr);
+  }
+
+  .journal-feature {
+    position: sticky;
+    top: 46px;
+    min-height: 620px;
+  }
+
+  .sheet {
+    width: min(700px, calc(100vw - 48px));
+    border-radius: var(--radius-lg);
+  }
+}
+
+@media (min-width: 1280px) {
+  .app-shell {
+    grid-template-columns: 302px minmax(0, 1fr);
+  }
+
+  .screen {
+    padding-inline: clamp(64px, 7vw, 110px);
+  }
+}
+
+@media (max-width: 540px) {
+  .screen {
+    padding-inline: 17px;
+  }
+
+  .forest-hero::after {
+    top: 18px;
+    right: 18px;
+    width: 60px;
+    height: 78px;
+  }
+
+  .forest-hero__copy {
+    width: 82%;
+  }
+
+  .brand__tagline {
+    letter-spacing: 0.16em;
+  }
+
+  .page-header::after {
+    width: 66px;
+  }
+}
+
+html[data-reduce-motion='true'] body::before,
+html[data-reduce-motion='true'] body::after,
+html[data-reduce-motion='true'] .app-stage::before {
+  display: none;
+}
+
+html[data-reduce-motion='true'] *,
+@media (prefers-reduced-motion: reduce) {
+  animation-duration: 1ms !important;
+  animation-iteration-count: 1 !important;
+  scroll-behavior: auto !important;
+  transition-duration: 1ms !important;
+}
